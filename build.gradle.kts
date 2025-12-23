@@ -36,7 +36,9 @@ dependencies {
 
     // IntelliJ Platform Gradle Plugin Dependencies Extension - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-dependencies-extension.html
     intellijPlatform {
-        intellijIdea(providers.gradleProperty("platformVersion"))
+        // Target PyCharm Community so `runIde` starts PyCharm instead of IntelliJ IDEA.
+        // Switch to `pycharmProfessional(...)` if you want to test against PyCharm Professional.
+        pycharmCommunity(providers.gradleProperty("platformVersion"))
 
         // Plugin Dependencies. Uses `platformBundledPlugins` property from the gradle.properties file for bundled IntelliJ Platform plugins.
         bundledPlugins(providers.gradleProperty("platformBundledPlugins").map { it.split(',') })
@@ -49,6 +51,9 @@ dependencies {
 
         testFramework(TestFrameworkType.Platform)
     }
+
+    // Password-based SSH support (JSch modern fork)
+    implementation("com.github.mwiede:jsch:0.2.16")
 }
 
 // Configure IntelliJ Platform Gradle Plugin - read more: https://plugins.jetbrains.com/docs/intellij/tools-intellij-platform-gradle-plugin-extension.html
