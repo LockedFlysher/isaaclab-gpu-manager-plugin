@@ -12,7 +12,6 @@ import com.intellij.openapi.options.SettingsEditor
 import com.intellij.openapi.project.Project
 import com.intellij.util.xmlb.XmlSerializer
 import org.jdom.Element
-import org.jetbrains.plugins.template.gpu.IsaacLabRunMode
 import org.jetbrains.plugins.template.gpu.IsaacLabRunner
 import org.jetbrains.plugins.template.gpu.IsaacLabRunnerSpec
 import org.jetbrains.plugins.template.gpu.SshParams
@@ -28,10 +27,6 @@ class IsaacLabRunConfiguration(
         var port: Int = 22,
         var username: String? = null,
         var identityFile: String? = null,
-
-        var mode: String = "Conda",
-        var condaEnv: String? = null,
-        var dockerContainer: String? = null,
 
         var script: String? = null,
         var task: String? = null,
@@ -61,7 +56,6 @@ class IsaacLabRunConfiguration(
         val host = state.host?.trim().orEmpty()
         if (host.isEmpty()) return null
 
-        val mode = if (state.mode.equals("Docker", ignoreCase = true)) IsaacLabRunMode.Docker else IsaacLabRunMode.Conda
         val gpuList = parseGpuList(state.gpuList)
         val numEnvs = state.numEnvs
 
@@ -73,9 +67,6 @@ class IsaacLabRunConfiguration(
         }
 
         val spec = IsaacLabRunnerSpec(
-            mode = mode,
-            condaEnv = state.condaEnv.orEmpty(),
-            dockerContainer = state.dockerContainer.orEmpty(),
             task = state.task.orEmpty(),
             numEnvs = numEnvs,
             extraParams = params,

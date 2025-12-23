@@ -11,7 +11,6 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.ui.components.JBTabbedPane
 import java.awt.BorderLayout
 import java.awt.Component
-import java.awt.CardLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridBagConstraints
@@ -21,15 +20,12 @@ import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
-import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JFileChooser
-import javax.swing.JComboBox
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JPasswordField
-import javax.swing.JRadioButton
 import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.JSpinner
@@ -80,13 +76,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
     // Runner / command preview (ported from gpu_manager_gui)
-    private val modeCondaRb = JRadioButton("Conda", true)
-    private val modeDockerRb = JRadioButton("Docker", false)
-    private val modeGroup = ButtonGroup()
-    private val condaEnvCombo = JComboBox<String>()
-    private val dockerContainerCombo = JComboBox<String>()
-    private val refreshEnvBtn = JButton("Refresh")
-    private val refreshDockerBtn = JButton("Refresh")
     private val taskField = JBTextField(18)
     private val numEnvsSpin = JSpinner(SpinnerNumberModel(1, 1, 65535, 1))
     private val gpuSelectAllBtn = JButton("All")
@@ -108,7 +97,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val previewArea = javax.swing.JTextArea(5, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
     private val copyPreviewBtn = JButton("Copy")
     private val saveRunConfigBtn = JButton("Save as Run Config")
-    private val modeCards = JPanel(CardLayout())
 
     private val gpuTableModel = object : DefaultTableModel(arrayOf("GPU", "Name", "Util", "Memory"), 0) {
         override fun isCellEditable(row: Int, column: Int) = false
@@ -240,25 +228,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             }
         })
 
-        // Runner tab UI (ported from gpu_manager_gui, but separated from connection settings)
-        modeGroup.add(modeCondaRb)
-        modeGroup.add(modeDockerRb)
-        condaEnvCombo.isEditable = true
-        dockerContainerCombo.isEditable = true
-        val condaCard = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(JLabel("Conda env"))
-            add(condaEnvCombo)
-            add(refreshEnvBtn)
-        }
-        val dockerCard = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(JLabel("Container"))
-            add(dockerContainerCombo)
-            add(refreshDockerBtn)
-        }
-        modeCards.add(condaCard, "Conda")
-        modeCards.add(dockerCard, "Docker")
-        (modeCards.layout as CardLayout).show(modeCards, "Conda")
-
         runnerPanel.border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
 
         val runnerTop = JPanel(GridBagLayout())
@@ -266,10 +235,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             gridx = x; gridy = y
             insets = Insets(2, 4, 2, 4)
         }
-        val modeRadio = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply { add(modeCondaRb); add(modeDockerRb) }
-        runnerTop.add(JLabel("Mode"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(modeRadio, gbc(1, 0).apply { anchor = GridBagConstraints.LINE_START })
-        runnerTop.add(modeCards, gbc(2, 0).apply { weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val argsRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(JLabel("--task"))
@@ -279,8 +244,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             try { (numEnvsSpin.editor as? JSpinner.DefaultEditor)?.textField?.columns = 6 } catch (_: Throwable) {}
             add(numEnvsSpin)
         }
-        runnerTop.add(JLabel("Args"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(argsRow, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("Args"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(argsRow, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val gpuRow = JPanel(BorderLayout(6, 0)).apply {
             val left = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
@@ -290,8 +255,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             add(left, BorderLayout.WEST)
             add(gpuBoxesPanel, BorderLayout.CENTER)
         }
-        runnerTop.add(JLabel("GPUs"), gbc(0, 2).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(gpuRow, gbc(1, 2).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("GPUs"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(gpuRow, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val paramsPanel = JPanel(BorderLayout(0, 4)).apply {
             val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
@@ -387,19 +352,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val updatePreview = { updateRunnerPreview() }
         taskField.document.addDocumentListener(docListener(updatePreview))
         try { (numEnvsSpin.editor as? JSpinner.DefaultEditor)?.textField?.document?.addDocumentListener(docListener(updatePreview)) } catch (_: Throwable) {}
-        fun onModeChanged() {
-            (modeCards.layout as CardLayout).show(modeCards, if (modeDockerRb.isSelected) "Docker" else "Conda")
-            updateRunnerPreview()
-            refreshRuntimeLists()
-        }
-        modeCondaRb.addActionListener { onModeChanged() }
-        modeDockerRb.addActionListener { onModeChanged() }
-        condaEnvCombo.addActionListener { updateRunnerPreview() }
-        dockerContainerCombo.addActionListener { updateRunnerPreview() }
         copyPreviewBtn.addActionListener { copyPreviewToClipboard() }
         saveRunConfigBtn.addActionListener { saveAsRunConfiguration() }
-        refreshEnvBtn.addActionListener { refreshCondaEnvs() }
-        refreshDockerBtn.addActionListener { refreshDockerContainers() }
         gpuSelectAllBtn.addActionListener { setAllRunnerGpus(true) }
         gpuSelectNoneBtn.addActionListener { setAllRunnerGpus(false) }
         addParamBtn.addActionListener { addTableRow(paramsTable, paramsModel) }
@@ -427,7 +381,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         } catch (_: Exception) {}
 
         updateRunnerPreview()
-        refreshRuntimeLists()
     }
 
     private fun getRunnerSelectedGpus(): List<Int> {
@@ -464,78 +417,15 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun collectRunner(): IsaacLabRunnerSpec {
-        val mode = if (modeDockerRb.isSelected) IsaacLabRunMode.Docker else IsaacLabRunMode.Conda
-        val condaEnv = (condaEnvCombo.editor.item?.toString() ?: condaEnvCombo.selectedItem?.toString() ?: "").trim()
-        val dockerContainer = (dockerContainerCombo.editor.item?.toString() ?: dockerContainerCombo.selectedItem?.toString() ?: "").trim()
         val task = taskField.text.trim()
         val numEnvs = try { (numEnvsSpin.value as Number).toInt() } catch (_: Throwable) { 0 }
         return IsaacLabRunnerSpec(
-            mode = mode,
-            condaEnv = condaEnv,
-            dockerContainer = dockerContainer,
             task = task,
             numEnvs = numEnvs,
             extraParams = collectParamsFromTable(),
             extraEnv = collectEnvFromTable(),
             gpuList = getRunnerSelectedGpus(),
         )
-    }
-
-    private fun refreshRuntimeLists() {
-        if (modeDockerRb.isSelected) {
-            refreshDockerContainers()
-        } else {
-            refreshCondaEnvs()
-        }
-    }
-
-    private fun refreshCondaEnvs() {
-        val p = currentParams
-        val exec = SshExec(p ?: SshParams(host = null))
-        Thread {
-            val cmd = (
-                "for p in \"\$HOME/miniconda3/etc/profile.d/conda.sh\" \"\$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; " +
-                "do [ -f \"\$p\" ] && . \"\$p\" && break; done; " +
-                "conda env list 2>/dev/null || conda info -e 2>/dev/null || true"
-            )
-            val (rc, out, err) = exec.run(cmd)
-            val text = (out + "\n" + err).trim()
-            val envs = text.lineSequence()
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !it.startsWith("#") }
-                .mapNotNull { ln ->
-                    val parts = ln.split(Regex("\\s+")).filter { it.isNotEmpty() }
-                    parts.firstOrNull()?.takeIf { it != "*" }
-                }
-                .distinct()
-                .toList()
-            edt {
-                val current = (condaEnvCombo.editor.item?.toString() ?: condaEnvCombo.selectedItem?.toString() ?: "").trim()
-                condaEnvCombo.removeAllItems()
-                for (e in envs) condaEnvCombo.addItem(e)
-                if (current.isNotEmpty()) condaEnvCombo.editor.item = current
-                updateRunnerPreview()
-                if (rc != 0 && debugEnabled) appendDebug("[runner] conda env list rc=$rc: ${err.trim()}\n")
-            }
-        }.start()
-    }
-
-    private fun refreshDockerContainers() {
-        val p = currentParams
-        val exec = SshExec(p ?: SshParams(host = null))
-        Thread {
-            val (rc, out, err) = exec.run("docker ps --format '{{.Names}}' 2>/dev/null || true")
-            val text = (out + "\n" + err).trim()
-            val names = text.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.distinct().toList()
-            edt {
-                val current = (dockerContainerCombo.editor.item?.toString() ?: dockerContainerCombo.selectedItem?.toString() ?: "").trim()
-                dockerContainerCombo.removeAllItems()
-                for (n in names) dockerContainerCombo.addItem(n)
-                if (current.isNotEmpty()) dockerContainerCombo.editor.item = current
-                updateRunnerPreview()
-                if (rc != 0 && debugEnabled) appendDebug("[runner] docker ps rc=$rc: ${err.trim()}\n")
-            }
-        }.start()
     }
 
     private fun updateRunnerPreview() {
@@ -577,9 +467,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             st.port = ssh.port
             st.username = ssh.username
             st.identityFile = ssh.identityFile
-            st.mode = if (runner.mode == IsaacLabRunMode.Docker) "Docker" else "Conda"
-            st.condaEnv = runner.condaEnv
-            st.dockerContainer = runner.dockerContainer
             st.script = null
             st.task = runner.task
             st.numEnvs = runner.numEnvs ?: 1

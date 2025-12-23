@@ -1,11 +1,6 @@
 package org.jetbrains.plugins.template.gpu
 
-enum class IsaacLabRunMode { Conda, Docker }
-
 data class IsaacLabRunnerSpec(
-    val mode: IsaacLabRunMode,
-    val condaEnv: String = "",
-    val dockerContainer: String = "",
     val task: String = "",
     val numEnvs: Int? = null,
     val extraParams: List<Pair<String, String?>> = emptyList(),
@@ -131,27 +126,10 @@ object IsaacLabRunner {
             return pairs.joinToString(" ")
         }
 
-        fun condaLine(): String {
-            val envQ = shQuote(spec.condaEnv.trim().ifEmpty { "base" })
-            return (
-                "for p in \"\$HOME/miniconda3/etc/profile.d/conda.sh\" \"\$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; " +
-                "do [ -f \"\$p\" ] && . \"\$p\" && break; done; " +
-                "ENV=$envQ; case \"\$ENV\" in miniconda3|anaconda3|miniforge3|mambaforge|micromamba|\"\" ) ENV=base;; esac; " +
-                "conda activate \"\$ENV\" 2>/dev/null || conda activate base 2>/dev/null"
-            )
-        }
-
         val basePy = buildPythonCmd(spec)
         val envPrefix = envInlinePrefix()
         val pyLine = if (envPrefix.isNotEmpty()) "$envPrefix $basePy" else basePy
-
-        return when (spec.mode) {
-            IsaacLabRunMode.Docker -> {
-                val name = spec.dockerContainer.trim()
-                val enter = if (name.isNotEmpty()) "docker exec -it $name bash -l" else "docker exec -it <container> bash -l"
-                listOf(enter, pyLine)
-            }
-            IsaacLabRunMode.Conda -> listOf(condaLine(), pyLine)
-        }
+        // IDE/interpreter should manage env activation (conda/docker); we only output the run command.
+        return listOf(pyLine)
     }
 }

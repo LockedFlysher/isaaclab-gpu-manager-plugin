@@ -3,7 +3,6 @@ package org.jetbrains.plugins.template.runner
 import com.intellij.execution.process.ProcessHandler
 import com.intellij.execution.process.ProcessOutputTypes
 import com.intellij.openapi.util.Key
-import org.jetbrains.plugins.template.gpu.IsaacLabRunMode
 import org.jetbrains.plugins.template.gpu.IsaacLabRunner
 import org.jetbrains.plugins.template.gpu.IsaacLabRunnerSpec
 import org.jetbrains.plugins.template.gpu.SshExec
@@ -32,29 +31,11 @@ class IsaacLabRemoteProcessHandler(
 
             if (stopped.get()) return
 
-            // Execute in a single SSH shell session.
-            when (spec.mode) {
-                IsaacLabRunMode.Conda -> {
-                    val condaLine = preview.getOrNull(0).orEmpty()
-                    val runLine = preview.getOrNull(1).orEmpty()
-                    if (condaLine.isNotBlank()) {
-                        val (rc, out, _) = exec.run(condaLine)
-                        if (out.isNotBlank()) notifyTextAvailable(out.trimEnd() + "\n", ProcessOutputTypes.STDOUT)
-                        if (rc != 0) notifyTextAvailable("[isaaclab] conda activation rc=$rc\n", ProcessOutputTypes.STDERR)
-                    }
-                    if (runLine.isNotBlank()) {
-                        val (rc, out, _) = exec.run(runLine)
-                        if (out.isNotBlank()) notifyTextAvailable(out.trimEnd() + "\n", ProcessOutputTypes.STDOUT)
-                        notifyTextAvailable("[isaaclab] finished rc=$rc\n", ProcessOutputTypes.SYSTEM)
-                    }
-                }
-                IsaacLabRunMode.Docker -> {
-                    // Best-effort: run the second line directly; the first line is an interactive enter command.
-                    val runLine = preview.getOrNull(1).orEmpty()
-                    val (rc, out, _) = exec.run(runLine)
-                    if (out.isNotBlank()) notifyTextAvailable(out.trimEnd() + "\n", ProcessOutputTypes.STDOUT)
-                    notifyTextAvailable("[isaaclab] finished rc=$rc\n", ProcessOutputTypes.SYSTEM)
-                }
+            val runLine = preview.firstOrNull().orEmpty()
+            if (runLine.isNotBlank()) {
+                val (rc, out, _) = exec.run(runLine)
+                if (out.isNotBlank()) notifyTextAvailable(out.trimEnd() + "\n", ProcessOutputTypes.STDOUT)
+                notifyTextAvailable("[isaaclab] finished rc=$rc\n", ProcessOutputTypes.SYSTEM)
             }
 
             notifyProcessTerminated(0)

@@ -10,7 +10,6 @@ import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
 import javax.swing.JButton
-import javax.swing.JComboBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
@@ -26,10 +25,6 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
     private val portSpin = JSpinner(SpinnerNumberModel(22, 1, 65535, 1))
     private val userField = JBTextField(18)
     private val identityField = JBTextField(32)
-
-    private val modeCombo = JComboBox(arrayOf("Conda", "Docker"))
-    private val condaEnvField = JBTextField(18)
-    private val dockerContainerField = JBTextField(18)
 
     private val taskField = JBTextField(18)
     private val numEnvsSpin = JSpinner(SpinnerNumberModel(1, 1, 65535, 1))
@@ -65,9 +60,6 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         row("Port", portSpin)
         row("User", userField)
         row("Identity", identityField)
-        row("Mode", modeCombo)
-        row("Conda env", condaEnvField)
-        row("Docker container", dockerContainerField)
         row("--task", taskField)
         row("--num_envs", numEnvsSpin)
         row("GPUs", gpuListField)
@@ -89,9 +81,6 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         portSpin.value = st.port
         userField.text = st.username.orEmpty()
         identityField.text = st.identityFile.orEmpty()
-        modeCombo.selectedItem = if (st.mode.equals("Docker", ignoreCase = true)) "Docker" else "Conda"
-        condaEnvField.text = st.condaEnv.orEmpty()
-        dockerContainerField.text = st.dockerContainer.orEmpty()
         taskField.text = st.task.orEmpty()
         numEnvsSpin.value = st.numEnvs
         gpuListField.text = st.gpuList.orEmpty()
@@ -121,9 +110,6 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         st.port = (portSpin.value as Number).toInt()
         st.username = userField.text.trim().ifEmpty { null }
         st.identityFile = identityField.text.trim().ifEmpty { null }
-        st.mode = (modeCombo.selectedItem?.toString() ?: "Conda")
-        st.condaEnv = condaEnvField.text.trim().ifEmpty { null }
-        st.dockerContainer = dockerContainerField.text.trim().ifEmpty { null }
         // Migration: this is now represented as `-p=<script>` in Params.
         st.script = null
         st.task = taskField.text.trim().ifEmpty { null }
