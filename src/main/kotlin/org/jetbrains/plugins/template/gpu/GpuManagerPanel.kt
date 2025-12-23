@@ -7,11 +7,14 @@ import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import java.awt.BorderLayout
+import java.awt.Component
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import javax.swing.BorderFactory
+import javax.swing.BoxLayout
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JFileChooser
@@ -42,12 +45,14 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
     private val rememberPwCb = JCheckBox("Remember")
     private val intervalSpin = JSpinner(SpinnerNumberModel(5.0, 1.0, 120.0, 1.0))
     private val nvidiaSmiPathField = JBTextField(32)
+    private val settingsPanel = JPanel(GridBagLayout())
     private val testBtn = JButton("Test")
     private val selfTestBtn = JButton("Self-Test")
     private val connectBtn = JButton("Connect")
-    private val disconnectBtn = JButton("Disconnect").apply { isEnabled = false }
+    private val disconnectBtn = JButton("Disconnect").apply { isEnabled = false; isVisible = false }
     private val debugToggleBtn = JButton("Debug")
     @Volatile private var debugEnabled: Boolean = true
+    @Volatile private var settingsCollapsed: Boolean = false
     private val debugArea = javax.swing.JTextArea(8, 80).apply {
         isEditable = false
         lineWrap = true
@@ -57,6 +62,8 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
 
     private val osLabel = JBLabel("")
     private val statusLabel = JBLabel("")
+    private val connSummaryLabel = JBLabel("Disconnected").apply { foreground = JBColor.GRAY }
+    private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
     private val gpuTableModel = object : DefaultTableModel(arrayOf("GPU", "Name", "Util", "Memory"), 0) {
         override fun isCellEditable(row: Int, column: Int) = false
@@ -69,16 +76,31 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
     @Volatile private var userResized: Boolean = false
 
     init {
-        // Top connection panel
-        val top = JPanel(GridBagLayout())
+        // Consistent left alignment for all input fields (including spinner editors)
+        hostField.horizontalAlignment = JTextField.LEFT
+        userField.horizontalAlignment = JTextField.LEFT
+        keyField.horizontalAlignment = JTextField.LEFT
+        nvidiaSmiPathField.horizontalAlignment = JTextField.LEFT
+        try { passField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { (portSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { (intervalSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+
+        // Top connection/settings panel (collapsible)
+        settingsPanel.border = BorderFactory.createCompoundBorder(
+            BorderFactory.createEmptyBorder(8, 8, 8, 8),
+            BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(JBColor.border(), 1, true),
+                BorderFactory.createEmptyBorder(8, 8, 8, 8),
+            ),
+        )
         var gx = 0; var gy = 0
         fun add(lbl: String, comp: java.awt.Component) {
-            top.add(JLabel(lbl), GridBagConstraints().apply {
+            settingsPanel.add(JLabel(lbl), GridBagConstraints().apply {
                 gridx = gx; gridy = gy; insets = Insets(2, 4, 2, 4); anchor = GridBagConstraints.LINE_END
             })
             val row = JPanel(java.awt.BorderLayout())
             row.add(comp, java.awt.BorderLayout.CENTER)
-            top.add(row, GridBagConstraints().apply {
+            settingsPanel.add(row, GridBagConstraints().apply {
                 gridx = gx + 1; gridy = gy; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(2, 4, 2, 12)
             })
             gy += 1
@@ -99,20 +121,45 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         add("Password", pwRow)
         add("Interval (s)", intervalSpin)
         add("nvidia-smi", nvidiaSmiPathField)
-        val btnRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(testBtn); add(connectBtn); add(disconnectBtn); add(selfTestBtn); add(debugToggleBtn)
-        }
-        top.add(btnRow, GridBagConstraints().apply {
-            gridx = 0; gridy = gy; gridwidth = 2; anchor = GridBagConstraints.LINE_START; insets = Insets(4, 4, 4, 4)
-        })
-        gy += 1
-        top.add(osLabel, GridBagConstraints().apply {
-            gridx = 0; gridy = gy; gridwidth = 2; anchor = GridBagConstraints.LINE_START; insets = Insets(2, 4, 4, 4)
-        })
+        add("OS", osLabel)
 
-        add(top, BorderLayout.NORTH)
-        // Debug area visible by default for diagnostics (will be placed into bottom panel with status bar)
-        debugPane.isVisible = true
+        // Put seldom-used actions inside Settings to avoid long-term header clutter.
+        val actionsRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            add(testBtn)
+            add(selfTestBtn)
+        }
+        add("Actions", actionsRow)
+
+        val header = JPanel(BorderLayout()).apply {
+            border = BorderFactory.createEmptyBorder(6, 8, 2, 8)
+        }
+        val titleLabel = JBLabel("IsaacLab Assistant")
+        val headerLeft = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            alignmentX = Component.LEFT_ALIGNMENT
+            add(titleLabel)
+            add(connSummaryLabel)
+        }
+        val headerButtons = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 0)).apply {
+            add(connectBtn)
+            add(disconnectBtn)
+            add(settingsToggleBtn)
+            add(debugToggleBtn)
+        }
+        // Separate rows to avoid overlap in narrow toolwindows.
+        header.add(headerLeft, BorderLayout.CENTER)
+        header.add(headerButtons, BorderLayout.SOUTH)
+
+        val topContainer = JPanel(BorderLayout())
+        topContainer.add(header, BorderLayout.NORTH)
+        topContainer.add(settingsPanel, BorderLayout.CENTER)
+        add(topContainer, BorderLayout.NORTH)
+
+        // Hide debug by default; it is noisy during normal use.
+        debugPane.isVisible = false
+        debugEnabled = false
+        settingsCollapsed = false
+        settingsToggleBtn.toolTipText = "Hide settings"
 
         // Center: GPU table only; util and memory rendered as colored bars
         gpuTable.fillsViewportHeight = true
@@ -174,6 +221,12 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
             debugEnabled = debugPane.isVisible
             revalidate(); repaint()
         }
+        settingsToggleBtn.addActionListener {
+            settingsCollapsed = !settingsCollapsed
+            settingsPanel.isVisible = !settingsCollapsed
+            settingsToggleBtn.toolTipText = if (settingsCollapsed) "Show settings" else "Hide settings"
+            revalidate(); repaint()
+        }
         selfTestBtn.addActionListener {
             appendDebug("[ui] panel alive @ " + java.time.LocalTime.now().toString() + "\n")
         }
@@ -182,12 +235,12 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         loadStateToUi()
 
         // Initial banner so user sees something immediately
-        appendDebug("IsaacLab GPU Manager panel initialized\n")
+        appendDebug("IsaacLab Assistant panel initialized\n")
         setStatus("UI ready")
         try {
             NotificationGroupManager.getInstance()
-                .getNotificationGroup("IsaacLabGPU")
-                .createNotification("GPU Manager panel constructed", NotificationType.INFORMATION)
+                .getNotificationGroup("IsaacLabAssistant")
+                .createNotification("IsaacLab Assistant panel constructed", NotificationType.INFORMATION)
                 .notify(null)
         } catch (_: Exception) {}
     }
@@ -268,6 +321,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         val p = formParams()
         currentParams = p
         setStatus("Connecting to ${buildDest(p)}:${p.port} …")
+        connSummaryLabel.text = "Connecting…"
 
         // Persist settings
         saveUiToState()
@@ -320,6 +374,19 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         poller = poll
         connectBtn.isEnabled = false
         disconnectBtn.isEnabled = true
+        // Reduce header clutter after connecting.
+        connectBtn.isVisible = false
+        testBtn.isVisible = false
+        disconnectBtn.isVisible = true
+        revalidate(); repaint()
+
+        val connText = "${buildDest(p)}:${p.port}"
+        connSummaryLabel.text = "Connected: " + shortenMiddle(connText, 40)
+        connSummaryLabel.toolTipText = connText
+        // Hide settings after connect to keep the UI focused on the GPU table.
+        settingsCollapsed = true
+        settingsPanel.isVisible = false
+        settingsToggleBtn.toolTipText = "Show settings"
     }
 
     private fun doDisconnect() {
@@ -327,8 +394,19 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         poller = null
         connectBtn.isEnabled = true
         disconnectBtn.isEnabled = false
+        // Restore header controls.
+        connectBtn.isVisible = true
+        testBtn.isVisible = true
+        disconnectBtn.isVisible = false
+        revalidate(); repaint()
         setStatus("")
         lastSnapshot = null
+        connSummaryLabel.text = "Disconnected"
+        connSummaryLabel.toolTipText = null
+        settingsCollapsed = false
+        // Show settings again so the user can adjust connection parameters.
+        // Keep debug state unchanged.
+        // Note: settingsPanel visibility is managed by settingsCollapsed.
     }
 
     private fun formParams(): SshParams {
@@ -359,6 +437,15 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         return parts.joinToString(" ")
     }
 
+    private fun shortenMiddle(s: String, maxLen: Int): String {
+        if (maxLen <= 8) return s.take(maxLen)
+        if (s.length <= maxLen) return s
+        val keep = maxLen - 1
+        val left = (keep * 2) / 3
+        val right = keep - left
+        return s.take(left) + "…" + s.takeLast(right)
+    }
+
     private fun setStatus(msg: String) {
         statusLabel.text = msg
     }
@@ -370,6 +457,12 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
     private fun appendDebug(s: String) {
         edt {
             try {
+                // Keep logs bounded to avoid long-term noise / memory growth.
+                val maxChars = 40_000
+                val trimTo = 30_000
+                if (debugArea.document.length > maxChars) {
+                    debugArea.replaceRange("", 0, debugArea.document.length - trimTo)
+                }
                 debugArea.append(s)
                 debugArea.caretPosition = debugArea.document.length
             } catch (_: Throwable) {}

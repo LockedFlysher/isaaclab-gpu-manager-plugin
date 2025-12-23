@@ -12,17 +12,15 @@ import org.jetbrains.plugins.template.gpu.GpuManagerPanel
 class MyToolWindowFactory : ToolWindowFactory {
 
     init {
-        thisLogger().warn("Sample code present: replacing template with GPU Manager toolwindow UI")
+        thisLogger().info("IsaacLab Assistant toolwindow factory initialized")
     }
 
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        // Notify visibly that the tool window content is being created
         try {
             NotificationGroupManager.getInstance()
-                .getNotificationGroup("IsaacLabGPU")
-                .createNotification("GPU Manager loaded", NotificationType.INFORMATION)
+                .getNotificationGroup("IsaacLabAssistant")
+                .createNotification("IsaacLab Assistant loaded", NotificationType.INFORMATION)
                 .notify(project)
-            println("[gpu-manager] createToolWindowContent")
         } catch (e: Exception) {
             thisLogger().warn("notification failed: ${e.message}")
         }
