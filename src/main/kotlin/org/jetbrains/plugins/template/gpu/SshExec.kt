@@ -4,10 +4,8 @@ import com.jcraft.jsch.ChannelShell
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import java.io.BufferedReader
-import java.io.ByteArrayOutputStream
 import java.io.OutputStream
 import java.io.InputStreamReader
-import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.util.Properties
 import java.util.concurrent.TimeUnit
@@ -17,9 +15,8 @@ data class SshParams(
     val port: Int = 22,
     val username: String? = null,
     val identityFile: String? = null,
-    val password: String? = null, // currently not used; reserved for future (JSch)
+    val password: String? = null,
     val nvidiaSmiPath: String? = null, // optional override for remote nvidia-smi location
-    val sshBin: String = "ssh",
     val timeoutSec: Long = 10,
 ) {
     fun isLocal(): Boolean {
@@ -45,9 +42,6 @@ class SshExec(private val params: SshParams) {
         session = null
     }
 
-    // ChannelShell mode does not provide a clean stdout/stderr split for command execution;
-    // we use marker-delimited output instead.
-
     fun run(remoteCmd: String): Triple<Int, String, String> {
         return if (params.isLocal()) runLocal(remoteCmd) else runViaSsh(remoteCmd)
     }
@@ -59,7 +53,6 @@ class SshExec(private val params: SshParams) {
 
     private fun runViaSsh(remoteCmd: String): Triple<Int, String, String> {
         // Always use JSch with an interactive shell channel (PTY) to match behavior of an interactive SSH session.
-        // This is the closest equivalent to the repo's Paramiko-based implementation and avoids PATH/module issues.
         return runViaJschShell(remoteCmd)
     }
 
@@ -107,17 +100,22 @@ class SshExec(private val params: SshParams) {
         return Pair(input, output)
     }
 
-    private fun dquote(s: String): String = "\"" + s
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"") + "\""
-
     private fun runViaJschShell(remoteCmd: String): Triple<Int, String, String> {
         return try {
             val (input, output) = ensureShell()
+            // Drain any pending prompt/banner output so markers are unambiguous.
+            try {
+                val drainBuf = ByteArray(4096)
+                while (output.available() > 0) {
+                    val n = output.read(drainBuf)
+                    if (n < 0) break
+                }
+            } catch (_: Throwable) {}
+
             val token = "__GPU_MGR_${System.nanoTime()}__"
             val begin = "$token:BEGIN"
             val end = "$token:END:"
-            // Use a marker-delimited transcript; keep it POSIX sh-compatible.
+            // ChannelShell doesn't provide a clean stdout/stderr split; capture a marker-delimited transcript.
             val wrapped = (
                 "printf %s\\\\n ${shQuote(begin)}; " +
                 "{ $remoteCmd; RC=${'$'}?; } 2>&1; " +
@@ -140,9 +138,10 @@ class SshExec(private val params: SshParams) {
                 if (bi >= 0) {
                     val ei = text.indexOf(end, bi + begin.length)
                     if (ei >= 0) {
-                        val afterEnd = text.indexOf('\n', ei)
+                        val lf = text.indexOf('\n', ei)
+                        val afterEnd = if (lf >= 0) lf else text.length
                         if (afterEnd > ei) {
-                            val rcStr = text.substring(ei + end.length, afterEnd).trim()
+                            val rcStr = text.substring(ei + end.length, afterEnd).trim().trimEnd('\r')
                             val rc = rcStr.toIntOrNull() ?: 0
                             val bodyStart = text.indexOf('\n', bi)
                             val body = if (bodyStart >= 0 && bodyStart + 1 <= ei) {

@@ -5,9 +5,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Background poller that fetches GPU info over SSH (or locally) and builds Snapshots.
  *
- * Important: all remote commands run through [SshExec], which executes them under the user's
- * login + interactive shell (via `SHELL -lic`). This matches an interactive SSH session so
- * `nvidia-smi` is available when it would be available manually.
+ * Important: all remote commands run through [SshExec] using an interactive PTY-backed SSH shell,
+ * matching a manual SSH session so `nvidia-smi` is available when it would be available manually.
  */
 class SshGpuPoller(
     private val params: SshParams,

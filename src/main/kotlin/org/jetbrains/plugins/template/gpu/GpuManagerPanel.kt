@@ -47,6 +47,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
     private val connectBtn = JButton("Connect")
     private val disconnectBtn = JButton("Disconnect").apply { isEnabled = false }
     private val debugToggleBtn = JButton("Debug")
+    @Volatile private var debugEnabled: Boolean = true
     private val debugArea = javax.swing.JTextArea(8, 80).apply {
         isEditable = false
         lineWrap = true
@@ -170,6 +171,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         disconnectBtn.addActionListener { doDisconnect() }
         debugToggleBtn.addActionListener {
             debugPane.isVisible = !debugPane.isVisible
+            debugEnabled = debugPane.isVisible
             revalidate(); repaint()
         }
         selfTestBtn.addActionListener {
@@ -252,11 +254,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
             if (rc == 0 && cleanedOut.isNotEmpty()) {
                 edt { Messages.showInfoMessage(this, "SSH OK\n\n$cleanedOut\n\n$summary", "Test") }
             } else if (rc == 0 && cleanedOut.isEmpty()) {
-                // Fallback diagnostic
-                val diag = "echo __DIAG__; which nvidia-smi || true; ls -l /usr/bin/nvidia-smi || true; echo PATH=\"${'$'}PATH\"; env | sort | head -n 50"
-                val (rc2, out2, err2) = exec.run(diag)
-                appendDebug("[test:diag] rc=$rc2\nstdout:\n${out2.trim()}\n\nstderr:\n${err2.trim()}\n")
-                val msg = "SSH OK, but no nvidia-smi output.\n(see Debug for details)\n\n$summary"
+                val msg = "SSH OK, but command produced no output.\n(see Debug for details)\n\n$summary"
                 edt { Messages.showWarningDialog(this, msg, "Test") }
             } else {
                 val msg = (err.ifBlank { out }).ifBlank { "ssh failed rc=$rc" } + "\n(see Debug for details)\n\n$summary"
@@ -314,7 +312,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
                 }
             }
             override fun onDebug(msg: String) {
-                edt { appendDebug("[poller] $msg\n") }
+                if (debugEnabled) edt { appendDebug("[poller] $msg\n") }
             }
         })
         poll.isDaemon = true
