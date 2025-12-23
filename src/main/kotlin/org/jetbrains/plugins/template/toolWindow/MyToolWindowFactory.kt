@@ -24,7 +24,7 @@ class MyToolWindowFactory : ToolWindowFactory {
         } catch (e: Exception) {
             thisLogger().warn("notification failed: ${e.message}")
         }
-        val panel = GpuManagerPanel()
+        val panel = GpuManagerPanel(project)
         val content = ContentFactory.getInstance().createContent(panel, null, false)
         toolWindow.contentManager.addContent(content)
     }
