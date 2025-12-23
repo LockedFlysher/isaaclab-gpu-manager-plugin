@@ -12,6 +12,5 @@
         <toolWindow factoryClass="org.jetbrains.plugins.template.toolWindow.MyToolWindowFactory" id="IsaacLab Assistant" anchor="left"/>
         <notificationGroup id="IsaacLabAssistant" displayType="BALLOON" isLogByDefault="true"/>
         <configurationType implementation="org.jetbrains.plugins.template.runner.IsaacLabRunConfigurationType"/>
-        <postStartupActivity implementation="org.jetbrains.plugins.template.startup.MyProjectActivity" />
     </extensions>
 </idea-plugin>

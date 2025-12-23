@@ -36,6 +36,7 @@ import javax.swing.SwingUtilities
 import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.application.ApplicationManager
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.event.ListSelectionEvent
@@ -796,12 +797,26 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         rememberPwCb.isSelected = st.rememberPassword
         intervalSpin.value = st.intervalSec
         nvidiaSmiPathField.text = st.nvidiaSmiPath.orEmpty()
-        // Load password from Password Safe if remembered
+        // Load password from Password Safe off-EDT (PasswordSafe may perform slow IO)
         if (st.rememberPassword && st.usePassword) {
-            val host = st.host.orEmpty()
+            val host = st.host.orEmpty().trim()
+            val port = st.port
+            val user = st.username
             if (host.isNotEmpty()) {
-                val pw = GpuManagerState.getInstance().loadPassword(host, st.port, st.username)
-                if (!pw.isNullOrEmpty()) passField.text = pw
+                ApplicationManager.getApplication().executeOnPooledThread {
+                    val pw = runCatching { GpuManagerState.getInstance().loadPassword(host, port, user) }.getOrNull()
+                    if (!pw.isNullOrEmpty()) {
+                        edt {
+                            val stillSame =
+                                hostField.text.trim() == host &&
+                                    (portSpin.value as? Number)?.toInt() == port &&
+                                    userField.text.trim() == (user ?: "")
+                            if (stillSame && usePasswordCb.isSelected && rememberPwCb.isSelected) {
+                                passField.text = pw
+                            }
+                        }
+                    }
+                }
             }
         }
         // Apply toggle
@@ -813,19 +828,22 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun saveUiToState() {
         val st = GpuManagerState.getInstance()
         val s = st.state
-        s.host = hostField.text.trim()
-        s.port = (portSpin.value as Number).toInt()
-        s.username = userField.text.trim()
+        val host = hostField.text.trim()
+        val port = (portSpin.value as Number).toInt()
+        val username = userField.text.trim()
+        s.host = host
+        s.port = port
+        s.username = username
         s.identity = keyField.text.trim()
         s.usePassword = usePasswordCb.isSelected
         s.rememberPassword = rememberPwCb.isSelected
         s.intervalSec = (intervalSpin.value as Number).toDouble()
         s.nvidiaSmiPath = nvidiaSmiPathField.text.trim().ifEmpty { null }
-        if (s.rememberPassword && s.usePassword) {
-            val pw = String(passField.password)
-            GpuManagerState.getInstance().savePassword(s.host.orEmpty(), s.port, s.username, pw)
-        } else {
-            GpuManagerState.getInstance().savePassword(s.host.orEmpty(), s.port, s.username, null)
+        // PasswordSafe writes must not happen on EDT (SlowOperations)
+        val shouldStorePw = s.rememberPassword && s.usePassword
+        val pw = if (shouldStorePw) String(passField.password) else null
+        ApplicationManager.getApplication().executeOnPooledThread {
+            runCatching { GpuManagerState.getInstance().savePassword(host, port, username, pw) }
         }
     }
 
