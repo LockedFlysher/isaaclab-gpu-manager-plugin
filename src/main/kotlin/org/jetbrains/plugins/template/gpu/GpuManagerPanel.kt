@@ -6,6 +6,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
+import com.intellij.ui.components.JBTabbedPane
 import java.awt.BorderLayout
 import java.awt.Component
 import java.awt.Dimension
@@ -13,6 +14,8 @@ import java.awt.FlowLayout
 import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.JButton
@@ -30,6 +33,10 @@ import javax.swing.SwingUtilities
 import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
+import javax.swing.event.ListSelectionEvent
+import javax.swing.event.ListSelectionListener
 import javax.swing.event.TableColumnModelEvent
 import javax.swing.event.TableColumnModelListener
 
@@ -65,10 +72,23 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
     private val connSummaryLabel = JBLabel("Disconnected").apply { foreground = JBColor.GRAY }
     private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
+    // Runner / command preview (ported from gpu_manager_gui)
+    private val scriptField = JBTextField(40)
+    private val condaEnvField = JBTextField(18)
+    private val useDockerCb = JCheckBox("Docker")
+    private val dockerContainerField = JBTextField(18)
+    private val forceTorchrunCb = JCheckBox("torchrun")
+    private val paramsArea = javax.swing.JTextArea(4, 40).apply { lineWrap = true; wrapStyleWord = true }
+    private val envArea = javax.swing.JTextArea(4, 40).apply { lineWrap = true; wrapStyleWord = true }
+    private val previewArea = javax.swing.JTextArea(5, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
+    private val copyPreviewBtn = JButton("Copy")
+
     private val gpuTableModel = object : DefaultTableModel(arrayOf("GPU", "Name", "Util", "Memory"), 0) {
         override fun isCellEditable(row: Int, column: Int) = false
     }
     private val gpuTable = JTable(gpuTableModel)
+    private val gpuScroll = JBScrollPane(gpuTable)
+    private val runnerPanel = JPanel(BorderLayout())
 
     @Volatile private var poller: SshGpuPoller? = null
     @Volatile private var currentParams: SshParams? = null
@@ -166,6 +186,7 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
         gpuTable.rowHeight = 22
         // Let user control widths; show horizontal scrollbar when needed
         gpuTable.autoResizeMode = JTable.AUTO_RESIZE_OFF
+        gpuTable.selectionModel.selectionMode = javax.swing.ListSelectionModel.MULTIPLE_INTERVAL_SELECTION
         // Set renderers: util (col 2) and memory (col 3)
         gpuTable.columnModel.getColumn(2).cellRenderer = PercentBarRenderer()
         gpuTable.columnModel.getColumn(3).cellRenderer = MemoryBarRenderer()
@@ -186,7 +207,46 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
                 }
             }
         })
-        add(JBScrollPane(gpuTable), BorderLayout.CENTER)
+        gpuScroll.viewport.addComponentListener(object : java.awt.event.ComponentAdapter() {
+            override fun componentResized(e: java.awt.event.ComponentEvent?) {
+                applyProportionalColumnWidths()
+            }
+        })
+
+        // Runner tab UI (ported from gpu_manager_gui, but separated from connection settings)
+        val runnerRow1 = JPanel(GridBagLayout()).apply {
+            add(JLabel("Script"), GridBagConstraints().apply { gridx = 0; insets = Insets(0, 0, 0, 6); anchor = GridBagConstraints.LINE_START })
+            add(scriptField, GridBagConstraints().apply { gridx = 1; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(0, 0, 0, 12) })
+            add(JLabel("Conda"), GridBagConstraints().apply { gridx = 2; insets = Insets(0, 0, 0, 6) })
+            add(condaEnvField, GridBagConstraints().apply { gridx = 3; insets = Insets(0, 0, 0, 12); fill = GridBagConstraints.HORIZONTAL })
+            add(useDockerCb, GridBagConstraints().apply { gridx = 4; insets = Insets(0, 0, 0, 6) })
+            add(dockerContainerField, GridBagConstraints().apply { gridx = 5; insets = Insets(0, 0, 0, 12); fill = GridBagConstraints.HORIZONTAL })
+            add(forceTorchrunCb, GridBagConstraints().apply { gridx = 6; insets = Insets(0, 0, 0, 0) })
+        }
+        val runnerRow2 = JPanel(GridBagLayout()).apply {
+            add(JLabel("Params"), GridBagConstraints().apply { gridx = 0; anchor = GridBagConstraints.FIRST_LINE_START; insets = Insets(0, 0, 0, 6) })
+            add(JBScrollPane(paramsArea), GridBagConstraints().apply { gridx = 1; weightx = 1.0; fill = GridBagConstraints.BOTH; insets = Insets(0, 0, 0, 12) })
+            add(JLabel("Env"), GridBagConstraints().apply { gridx = 2; anchor = GridBagConstraints.FIRST_LINE_START; insets = Insets(0, 0, 0, 6) })
+            add(JBScrollPane(envArea), GridBagConstraints().apply { gridx = 3; weightx = 1.0; fill = GridBagConstraints.BOTH; insets = Insets(0, 0, 0, 0) })
+        }
+        val runnerRow3 = JPanel(BorderLayout()).apply {
+            val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+                add(JLabel("Preview"))
+                add(copyPreviewBtn)
+                add(JLabel("GPU selection comes from table row selection"))
+            }
+            add(top, BorderLayout.NORTH)
+            add(JBScrollPane(previewArea), BorderLayout.CENTER)
+        }
+        runnerPanel.add(runnerRow1, BorderLayout.NORTH)
+        runnerPanel.add(runnerRow2, BorderLayout.CENTER)
+        runnerPanel.add(runnerRow3, BorderLayout.SOUTH)
+
+        val tabs = JBTabbedPane().apply {
+            addTab("Monitor", gpuScroll)
+            addTab("Runner", runnerPanel)
+        }
+        add(tabs, BorderLayout.CENTER)
 
         // Bottom panel: debug (center) + status bar (south)
         val statusBar = JPanel(BorderLayout())
@@ -231,6 +291,27 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
             appendDebug("[ui] panel alive @ " + java.time.LocalTime.now().toString() + "\n")
         }
 
+        fun docListener(block: () -> Unit): DocumentListener = object : DocumentListener {
+            override fun insertUpdate(e: DocumentEvent?) = block()
+            override fun removeUpdate(e: DocumentEvent?) = block()
+            override fun changedUpdate(e: DocumentEvent?) = block()
+        }
+        val updatePreview = { updateRunnerPreview() }
+        scriptField.document.addDocumentListener(docListener(updatePreview))
+        condaEnvField.document.addDocumentListener(docListener(updatePreview))
+        dockerContainerField.document.addDocumentListener(docListener(updatePreview))
+        paramsArea.document.addDocumentListener(docListener(updatePreview))
+        envArea.document.addDocumentListener(docListener(updatePreview))
+        useDockerCb.addChangeListener { updateRunnerPreview() }
+        forceTorchrunCb.addChangeListener { updateRunnerPreview() }
+        gpuTable.selectionModel.addListSelectionListener(object : ListSelectionListener {
+            override fun valueChanged(e: ListSelectionEvent?) {
+                if (e != null && e.valueIsAdjusting) return
+                updateRunnerPreview()
+            }
+        })
+        copyPreviewBtn.addActionListener { copyPreviewToClipboard() }
+
         // Load persisted state
         loadStateToUi()
 
@@ -243,6 +324,181 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
                 .createNotification("IsaacLab Assistant panel constructed", NotificationType.INFORMATION)
                 .notify(null)
         } catch (_: Exception) {}
+
+        updateRunnerPreview()
+    }
+
+    private data class Runner(
+        val condaEnv: String,
+        val useDocker: Boolean,
+        val dockerContainer: String,
+        val script: String,
+        val params: List<Pair<String, String?>>,
+        val env: List<Pair<String, String>>,
+        val useTorchrun: Boolean,
+        val gpuList: List<Int>,
+    )
+
+    private fun selectedGpuIndices(): List<Int> {
+        val rows = gpuTable.selectedRows ?: return emptyList()
+        val idxs = ArrayList<Int>()
+        for (r in rows) {
+            val v = gpuTableModel.getValueAt(r, 0)
+            val i = when (v) {
+                is Number -> v.toInt()
+                else -> v?.toString()?.trim()?.toIntOrNull()
+            } ?: continue
+            idxs += i
+        }
+        return idxs.distinct().sorted()
+    }
+
+    private fun parseParams(text: String): List<Pair<String, String?>> {
+        val out = ArrayList<Pair<String, String?>>()
+        text.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) return@forEach
+            val eq = line.indexOf('=')
+            if (eq < 0) {
+                out += Pair(line, null)
+            } else {
+                val k = line.substring(0, eq).trim()
+                val v = line.substring(eq + 1).trim()
+                if (k.isNotEmpty()) out += Pair(k, v)
+            }
+        }
+        return out
+    }
+
+    private fun parseEnv(text: String): List<Pair<String, String>> {
+        val out = ArrayList<Pair<String, String>>()
+        text.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) return@forEach
+            val eq = line.indexOf('=')
+            if (eq < 0) return@forEach
+            val k = line.substring(0, eq).trim()
+            val v = line.substring(eq + 1).trim()
+            if (k.isNotEmpty()) out += Pair(k, v)
+        }
+        return out
+    }
+
+    private fun collectRunner(): Runner {
+        val gsel = selectedGpuIndices()
+        val baseEnv = parseEnv(envArea.text)
+        val envList = ArrayList<Pair<String, String>>(baseEnv.size + 1)
+        if (gsel.isNotEmpty()) {
+            envList += Pair("CUDA_VISIBLE_DEVICES", gsel.joinToString(","))
+        }
+        for ((k, v) in baseEnv) {
+            if (k.trim().equals("CUDA_VISIBLE_DEVICES", ignoreCase = true)) continue
+            envList += Pair(k, v)
+        }
+        return Runner(
+            condaEnv = condaEnvField.text.trim(),
+            useDocker = useDockerCb.isSelected,
+            dockerContainer = dockerContainerField.text.trim(),
+            script = scriptField.text.trim(),
+            params = parseParams(paramsArea.text),
+            env = envList,
+            useTorchrun = forceTorchrunCb.isSelected,
+            gpuList = gsel,
+        )
+    }
+
+    private fun buildPythonCmd(r: Runner): String {
+        val nproc = r.gpuList.size
+        val useTorchrun = (nproc > 1) || r.useTorchrun
+
+        val parts = ArrayList<String>()
+        parts += "./isaaclab.sh"
+        parts += "-p"
+        if (useTorchrun) {
+            parts += listOf("-m", "torch.distributed.run", "--nnodes=1", "--nproc_per_node=${maxOf(1, nproc)}")
+        }
+        if (r.script.isNotEmpty()) parts += shQuote(r.script)
+
+        var haveDistributed = false
+        for ((k0, v0) in r.params) {
+            val key0 = k0.trim()
+            if (key0.isEmpty()) continue
+            if (key0 == "distributed" || key0 == "--distributed") haveDistributed = true
+            val key = if (key0.startsWith("--")) key0 else "--$key0"
+            if (v0.isNullOrEmpty()) {
+                parts += key
+            } else {
+                parts += "$key=${shQuote(v0)}"
+            }
+        }
+        if (useTorchrun && !haveDistributed) parts += "--distributed"
+        return parts.joinToString(" ")
+    }
+
+    private fun buildPreviewCommands(r: Runner): List<String> {
+        val envDict = LinkedHashMap<String, String>()
+        for ((k, v) in r.env) {
+            val kk = k.trim()
+            if (kk.isNotEmpty()) envDict[kk] = v
+        }
+
+        fun envInlinePrefix(): String {
+            val pairs = ArrayList<String>()
+            for ((k, v) in envDict) {
+                val kk = k.trim()
+                if (kk.isEmpty()) continue
+                pairs += "${kk}=${shQuote(v)}"
+            }
+            return pairs.joinToString(" ")
+        }
+
+        fun condaLine(): String {
+            val condaEnv = if (r.useDocker) "" else r.condaEnv.trim()
+            if (condaEnv.isEmpty()) return ""
+            val envQ = shQuote(condaEnv)
+            return (
+                "for p in \"\$HOME/miniconda3/etc/profile.d/conda.sh\" \"\$HOME/anaconda3/etc/profile.d/conda.sh\" /opt/conda/etc/profile.d/conda.sh; " +
+                "do [ -f \"\$p\" ] && . \"\$p\" && break; done; " +
+                "ENV=$envQ; case \"\$ENV\" in miniconda3|anaconda3|miniforge3|mambaforge|micromamba|\"\" ) ENV=base;; esac; " +
+                "conda activate \"\$ENV\" 2>/dev/null || conda activate base 2>/dev/null"
+            )
+        }
+
+        val cmds = ArrayList<String>()
+        val basePy = buildPythonCmd(r)
+        val envPrefix = envInlinePrefix()
+        val pyLine = if (envPrefix.isNotEmpty()) "$envPrefix $basePy" else basePy
+
+        if (r.useDocker) {
+            val name = r.dockerContainer.trim()
+            cmds += if (name.isNotEmpty()) "docker exec -it $name bash -l" else "docker exec -it <container> bash -l"
+            cmds += pyLine
+            return cmds
+        }
+
+        val cl = condaLine()
+        if (cl.isNotEmpty()) cmds += cl
+        cmds += pyLine
+        return cmds
+    }
+
+    private fun updateRunnerPreview() {
+        try {
+            val r = collectRunner()
+            val cmds = buildPreviewCommands(r)
+            previewArea.text = cmds.joinToString("\n")
+        } catch (e: Exception) {
+            previewArea.text = "preview error: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    private fun copyPreviewToClipboard() {
+        val s = previewArea.text.orEmpty().trim()
+        if (s.isEmpty()) return
+        try {
+            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(s), null)
+            setStatus("Copied preview commands")
+        } catch (_: Exception) {}
     }
 
     private fun snapshotToTables(s: Snapshot) {
@@ -253,13 +509,35 @@ class GpuManagerPanel : JBPanel<GpuManagerPanel>(BorderLayout()) {
             val mem = Pair(g.memUsedMiB, g.memTotalMiB)
             gpuTableModel.addRow(arrayOf(g.index, g.name, util, mem))
         }
-        // Auto-fit columns once unless user already resized
-        if (!userResized) adjustAllColumns()
+        applyProportionalColumnWidths()
     }
 
-    private fun adjustAllColumns() {
-        val cols = gpuTable.columnCount
-        for (c in 0 until cols) adjustSingleColumn(c)
+    private fun applyProportionalColumnWidths() {
+        if (gpuTable.columnCount < 4) return
+        val viewportW = gpuScroll.viewport.width
+        if (viewportW <= 0) return
+        // Ratio: 1 : 5 : 3 : 3
+        val weights = intArrayOf(1, 5, 3, 3)
+        val sum = weights.sum().coerceAtLeast(1)
+
+        val available = (viewportW - 8).coerceAtLeast(1)
+        val widths = IntArray(4) { i -> (available * weights[i] / sum).coerceAtLeast(1) }
+        // Fix rounding mismatch by distributing remainder
+        var delta = available - widths.sum()
+        var guard = 0
+        while (delta != 0 && guard++ < 200) {
+            val idx = guard % 4
+            val step = if (delta > 0) 1 else -1
+            val next = widths[idx] + step
+            if (next >= 1) {
+                widths[idx] = next
+                delta -= step
+            }
+        }
+        for (c in 0..3) {
+            val col = gpuTable.columnModel.getColumn(c)
+            col.preferredWidth = widths[c]
+        }
     }
 
     private fun adjustSingleColumn(col: Int) {

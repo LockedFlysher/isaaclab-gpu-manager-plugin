@@ -70,7 +70,7 @@ class MemoryBarRenderer(
                 total = (value.second as? Number)?.toInt() ?: 0
             }
             is String -> {
-                // Fallback parse "123 / 456 MiB"
+                // Fallback parse "123 / 456 MiB" or "1.2 / 4.0 GB"
                 val nums = Regex("\\d+").findAll(value).map { it.value.toInt() }.toList()
                 used = nums.getOrNull(0) ?: 0
                 total = nums.getOrNull(1) ?: 0
@@ -78,7 +78,9 @@ class MemoryBarRenderer(
             else -> { used = 0; total = 0 }
         }
         if (total <= 0) total = 1
-        text = "$used / $total MiB"
+        val usedGb = used / 1024.0
+        val totalGb = total / 1024.0
+        text = String.format("%.1f / %.1f GB", usedGb, totalGb)
         background = if (isSelected) table.selectionBackground else table.background
         foreground = table.foreground
         return this
