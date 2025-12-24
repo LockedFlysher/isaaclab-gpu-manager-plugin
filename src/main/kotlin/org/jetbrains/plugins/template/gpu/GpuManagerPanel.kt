@@ -39,8 +39,11 @@ import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.roots.ProjectRootManager
+import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import org.jdom.Element
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -98,8 +101,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         toolTipText = "Enable IsaacLab livestream (sets env var LIVESTREAM=2)."
     }
     private val experimentNameField = JBTextField(18)
-    private val loadRunField = JBTextField(18)
-    private val checkpointField = JBTextField(18)
+    private val loadRunField = TextFieldWithBrowseButton(JBTextField(18)).apply {
+        toolTipText = "Folder for --load_run (select a run directory)"
+    }
+    private val checkpointField = TextFieldWithBrowseButton(JBTextField(18)).apply {
+        toolTipText = "Checkpoint file for --checkpoint (select a .pt file)"
+    }
     private val gpuBoxesPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.X_AXIS) }
     private val gpuBoxesScroll = JBScrollPane(gpuBoxesPanel).apply {
         horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
@@ -152,8 +159,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         taskField.horizontalAlignment = JTextField.LEFT
         numEnvsField.horizontalAlignment = JTextField.LEFT
         experimentNameField.horizontalAlignment = JTextField.LEFT
-        loadRunField.horizontalAlignment = JTextField.LEFT
-        checkpointField.horizontalAlignment = JTextField.LEFT
+        try { loadRunField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { checkpointField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { passField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (portSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (intervalSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
@@ -280,8 +287,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         allowShrinkField(entryScriptField)
         allowShrinkField(taskField)
         allowShrinkField(experimentNameField)
-        allowShrinkField(loadRunField)
-        allowShrinkField(checkpointField)
+        allowShrinkField(loadRunField.textField)
+        allowShrinkField(checkpointField.textField)
 
         // Row 0: Entry (-p) full width
         entryScriptField.columns = 40
@@ -329,8 +336,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             gridx = x; gridy = y; insets = Insets(2, 0, 2, 8); anchor = GridBagConstraints.LINE_END
         }
         experimentNameField.columns = 26
-        loadRunField.columns = 26
-        checkpointField.columns = 26
+        loadRunField.textField.columns = 26
+        checkpointField.textField.columns = 26
         resumeDetailsPanel.add(JLabel("--experiment_name"), rbc(0, 0))
         resumeDetailsPanel.add(experimentNameField, rbc(0, 1).apply { weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
         resumeDetailsPanel.add(JLabel("--load_run"), rbc(1, 0))
@@ -442,15 +449,17 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         taskField.document.addDocumentListener(docListener(updatePreview))
         numEnvsField.document.addDocumentListener(docListener(updatePreview))
         experimentNameField.document.addDocumentListener(docListener(updatePreview))
-        loadRunField.document.addDocumentListener(docListener(updatePreview))
-        checkpointField.document.addDocumentListener(docListener(updatePreview))
+        loadRunField.textField.document.addDocumentListener(docListener(updatePreview))
+        checkpointField.textField.document.addDocumentListener(docListener(updatePreview))
         headlessCb.addChangeListener { updateRunnerPreview() }
         livestreamCb.addChangeListener { updateRunnerPreview() }
         resumeCb.addChangeListener {
             val on = resumeCb.isSelected
             experimentNameField.isEnabled = on
             loadRunField.isEnabled = on
+            loadRunField.textField.isEnabled = on
             checkpointField.isEnabled = on
+            checkpointField.textField.isEnabled = on
             resumeSectionPanel.isVisible = on
             updateRunnerPreview()
             runnerPanel.revalidate()
@@ -469,11 +478,16 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         // Default resume detail fields disabled until resume is enabled
         experimentNameField.isEnabled = false
         loadRunField.isEnabled = false
+        loadRunField.textField.isEnabled = false
         checkpointField.isEnabled = false
+        checkpointField.textField.isEnabled = false
         resumeSectionPanel.isVisible = false
 
         // Load persisted state
         loadStateToUi()
+
+        // Runner tab: show a helpful placeholder until GPUs are detected.
+        ensureRunnerGpuBoxes(0)
 
         // Initial banner so user sees something immediately
         appendDebug("IsaacLab Assistant panel initialized\n")
@@ -486,6 +500,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         } catch (_: Exception) {}
 
         updateRunnerPreview()
+        installResumeFileChoosers()
     }
 
     private fun getRunnerSelectedGpus(): List<Int> {
@@ -499,6 +514,20 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun ensureRunnerGpuBoxes(n: Int) {
         val count = n.coerceAtLeast(0)
         val prev = getRunnerSelectedGpus().toSet()
+        if (count == 0) {
+            val msg = if (poller == null) "Connect to detect GPUs" else "No GPUs detected"
+            val already =
+                runnerGpuBoxes.isEmpty() &&
+                    gpuBoxesPanel.componentCount == 1 &&
+                    (gpuBoxesPanel.getComponent(0) as? JBLabel)?.text == msg
+            if (already) return
+            gpuBoxesPanel.removeAll()
+            runnerGpuBoxes = emptyList()
+            gpuBoxesPanel.add(JBLabel(msg).apply { foreground = JBColor.GRAY })
+            gpuBoxesPanel.revalidate()
+            gpuBoxesPanel.repaint()
+            return
+        }
         if (runnerGpuBoxes.size == count) return
         gpuBoxesPanel.removeAll()
         val boxes = ArrayList<JCheckBox>(count)
@@ -532,6 +561,33 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             extraEnv = collectEnvFromTable(),
             gpuList = getRunnerSelectedGpus(),
         )
+    }
+
+    private fun installResumeFileChoosers() {
+        loadRunField.addActionListener {
+            val descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor().apply {
+                title = "Select --load_run Folder"
+                description = "Select the run directory to resume from (will be used as --load_run)."
+            }
+            val vf = FileChooser.chooseFile(descriptor, project, null) ?: return@addActionListener
+            loadRunField.text = toProjectRelativePath(vf.path)
+            updateRunnerPreview()
+        }
+        checkpointField.addActionListener {
+            val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("pt").apply {
+                title = "Select --checkpoint File (.pt)"
+                description = "Select a .pt checkpoint file (will be used as --checkpoint)."
+            }
+            val vf = FileChooser.chooseFile(descriptor, project, null) ?: return@addActionListener
+            checkpointField.text = toProjectRelativePath(vf.path)
+            updateRunnerPreview()
+        }
+    }
+
+    private fun toProjectRelativePath(absPath: String): String {
+        val base = project.basePath?.trim()?.trimEnd('/') ?: return absPath
+        val prefix = base + "/"
+        return if (absPath.startsWith(prefix)) absPath.removePrefix(prefix) else absPath
     }
 
     private fun updateRunnerPreview() {
@@ -926,6 +982,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         revalidate(); repaint()
         setStatus("")
         lastSnapshot = null
+        ensureRunnerGpuBoxes(0)
+        updateRunnerPreview()
         connSummaryLabel.text = "Disconnected"
         connSummaryLabel.toolTipText = null
         settingsCollapsed = false
