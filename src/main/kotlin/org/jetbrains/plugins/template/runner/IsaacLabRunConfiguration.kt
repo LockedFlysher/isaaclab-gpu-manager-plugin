@@ -33,6 +33,14 @@ class IsaacLabRunConfiguration(
         var numEnvs: Int = 1,
         var gpuList: String? = null, // "0,1,2"
 
+        var entryScript: String? = null,
+        var headless: Boolean = false,
+        var resume: Boolean = false,
+        var experimentName: String? = null,
+        var loadRun: String? = null,
+        var checkpoint: String? = null,
+        var livestream: Boolean = false,
+
         var extraParamsText: String? = null,
         var extraEnvText: String? = null,
     )
@@ -67,8 +75,15 @@ class IsaacLabRunConfiguration(
         }
 
         val spec = IsaacLabRunnerSpec(
+            entryScript = state.entryScript.orEmpty(),
             task = state.task.orEmpty(),
             numEnvs = numEnvs,
+            headless = state.headless,
+            resume = state.resume,
+            experimentName = state.experimentName.orEmpty(),
+            loadRun = state.loadRun.orEmpty(),
+            checkpoint = state.checkpoint.orEmpty(),
+            livestream = state.livestream,
             extraParams = params,
             extraEnv = IsaacLabRunner.parseEnv(state.extraEnvText.orEmpty()),
             gpuList = gpuList,

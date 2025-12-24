@@ -10,12 +10,13 @@ import java.awt.GridBagConstraints
 import java.awt.GridBagLayout
 import java.awt.Insets
 import javax.swing.JButton
+import javax.swing.JCheckBox
 import javax.swing.JComponent
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JScrollPane
-import javax.swing.JSpinner
 import javax.swing.JTable
+import javax.swing.JSpinner
 import javax.swing.SpinnerNumberModel
 import javax.swing.table.DefaultTableModel
 
@@ -27,8 +28,21 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
     private val identityField = JBTextField(32)
 
     private val taskField = JBTextField(18)
-    private val numEnvsSpin = JSpinner(SpinnerNumberModel(1, 1, 65535, 1))
+    private val numEnvsField = JBTextField(10).apply { text = "1" }
     private val gpuListField = JBTextField(18)
+    private val entryScriptField = JBTextField(40)
+    private val headlessCb = JCheckBox("--headless").apply {
+        toolTipText = "Run without UI rendering (recommended for remote/headless training)."
+    }
+    private val resumeCb = JCheckBox("--resume").apply {
+        toolTipText = "Resume training from a previous run (requires experiment_name/load_run/checkpoint)."
+    }
+    private val livestreamCb = JCheckBox("LIVESTREAM=2").apply {
+        toolTipText = "Enable IsaacLab livestream (sets env var LIVESTREAM=2)."
+    }
+    private val experimentNameField = JBTextField(18)
+    private val loadRunField = JBTextField(18)
+    private val checkpointField = JBTextField(18)
 
     private val paramsModel = object : DefaultTableModel(arrayOf("Key", "Value"), 0) {
         override fun isCellEditable(row: Int, column: Int) = true
@@ -60,11 +74,27 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         row("Port", portSpin)
         row("User", userField)
         row("Identity", identityField)
+        row("-p", entryScriptField)
         row("--task", taskField)
-        row("--num_envs", numEnvsSpin)
+        row("--num_envs", numEnvsField)
+        row("Headless", headlessCb)
+        row("Resume", resumeCb)
+        row("--experiment_name", experimentNameField)
+        row("--load_run", loadRunField)
+        row("--checkpoint", checkpointField)
+        row("Livestream", livestreamCb)
         row("GPUs", gpuListField)
         row("Params", tablePanel(paramsTable, addParamBtn, delParamBtn))
         row("Env", tablePanel(envTable, addEnvBtn, delEnvBtn))
+
+        fun updateResumeEnabled() {
+            val on = resumeCb.isSelected
+            experimentNameField.isEnabled = on
+            loadRunField.isEnabled = on
+            checkpointField.isEnabled = on
+        }
+        resumeCb.addChangeListener { updateResumeEnabled() }
+        updateResumeEnabled()
 
         addParamBtn.addActionListener { addRow(paramsTable, paramsModel) }
         delParamBtn.addActionListener { deleteRows(paramsTable, paramsModel) }
@@ -81,9 +111,16 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         portSpin.value = st.port
         userField.text = st.username.orEmpty()
         identityField.text = st.identityFile.orEmpty()
+        entryScriptField.text = st.entryScript.orEmpty()
         taskField.text = st.task.orEmpty()
-        numEnvsSpin.value = st.numEnvs
+        numEnvsField.text = st.numEnvs.toString()
         gpuListField.text = st.gpuList.orEmpty()
+        headlessCb.isSelected = st.headless
+        resumeCb.isSelected = st.resume
+        experimentNameField.text = st.experimentName.orEmpty()
+        loadRunField.text = st.loadRun.orEmpty()
+        checkpointField.text = st.checkpoint.orEmpty()
+        livestreamCb.isSelected = st.livestream
 
         paramsModel.rowCount = 0
         val params = IsaacLabRunner.parseParams(st.extraParamsText.orEmpty()).toMutableList()
@@ -91,9 +128,12 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         if (legacyScript.isNotEmpty() && params.none { (k, _) -> k.trim() == "-p" }) {
             params.add(0, Pair("-p", legacyScript))
         }
-        if (params.none { (k, _) -> k.trim() == "-p" }) {
-            params.add(0, Pair("-p", ""))
+        val pFromParams = params.firstOrNull { (k, _) -> k.trim() == "-p" }?.second?.trim().orEmpty()
+        if (entryScriptField.text.trim().isEmpty() && pFromParams.isNotEmpty()) {
+            entryScriptField.text = pFromParams
         }
+        // `-p` is now stored in the dedicated field; keep Params table for extra flags only.
+        params.removeAll { (k, _) -> k.trim() == "-p" }
         for ((k, v) in params) {
             paramsModel.addRow(arrayOf(k, v.orEmpty()))
         }
@@ -113,8 +153,15 @@ class IsaacLabRunConfigurationEditor(private val project: Project) : SettingsEdi
         // Migration: this is now represented as `-p=<script>` in Params.
         st.script = null
         st.task = taskField.text.trim().ifEmpty { null }
-        st.numEnvs = (numEnvsSpin.value as Number).toInt()
+        st.numEnvs = numEnvsField.text.trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
         st.gpuList = gpuListField.text.trim().ifEmpty { null }
+        st.entryScript = entryScriptField.text.trim().ifEmpty { null }
+        st.headless = headlessCb.isSelected
+        st.resume = resumeCb.isSelected
+        st.experimentName = experimentNameField.text.trim().ifEmpty { null }
+        st.loadRun = loadRunField.text.trim().ifEmpty { null }
+        st.checkpoint = checkpointField.text.trim().ifEmpty { null }
+        st.livestream = livestreamCb.isSelected
         st.extraParamsText = paramsToText()
         st.extraEnvText = envToText()
     }

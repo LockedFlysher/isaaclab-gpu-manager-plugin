@@ -1,8 +1,15 @@
 package org.jetbrains.plugins.template.gpu
 
 data class IsaacLabRunnerSpec(
+    val entryScript: String = "",
     val task: String = "",
     val numEnvs: Int? = null,
+    val headless: Boolean = false,
+    val resume: Boolean = false,
+    val experimentName: String = "",
+    val loadRun: String = "",
+    val checkpoint: String = "",
+    val livestream: Boolean = false,
     val extraParams: List<Pair<String, String?>> = emptyList(),
     val extraEnv: List<Pair<String, String>> = emptyList(),
     val gpuList: List<Int> = emptyList(),
@@ -56,7 +63,19 @@ object IsaacLabRunner {
                 }
                 rest += Pair(k0, v0)
             }
-            Pair(v.orEmpty(), rest)
+            val fromField = spec.entryScript.trim()
+            Pair(if (fromField.isNotEmpty()) fromField else v.orEmpty(), rest)
+        }
+
+        // Validate "known" fields (we intentionally avoid quoting in previews)
+        requireShellSafeToken("-p", pValue, allowEmpty = false)
+        if (spec.task.isNotBlank()) requireShellSafeToken("--task", spec.task)
+        val nenv = spec.numEnvs
+        if (nenv != null && nenv > 0) requireShellSafeToken("--num_envs", nenv.toString())
+        if (spec.resume) {
+            if (spec.experimentName.isNotBlank()) requireShellSafeToken("--experiment_name", spec.experimentName)
+            if (spec.loadRun.isNotBlank()) requireShellSafeToken("--load_run", spec.loadRun)
+            if (spec.checkpoint.isNotBlank()) requireShellSafeToken("--checkpoint", spec.checkpoint)
         }
 
         val parts = ArrayList<String>()
@@ -65,16 +84,28 @@ object IsaacLabRunner {
         if (useTorchrun) {
             parts += listOf("-m", "torch.distributed.run", "--nnodes=1", "--nproc_per_node=${maxOf(1, nproc)}")
         }
-        parts += if (pValue.isNotBlank()) shQuote(pValue) else "<python_entry>"
+        parts += if (pValue.isNotBlank()) shQuoteIfNeeded(pValue) else "<python_entry>"
 
         val preset = ArrayList<Pair<String, String?>>()
         if (spec.task.isNotBlank()) preset += Pair("task", spec.task.trim())
-        val nenv = spec.numEnvs
         if (nenv != null && nenv > 0) preset += Pair("num_envs", nenv.toString())
+        if (spec.headless) preset += Pair("headless", null)
+        if (spec.resume) {
+            preset += Pair("resume", null)
+            if (spec.experimentName.isNotBlank()) preset += Pair("experiment_name", spec.experimentName.trim())
+            if (spec.loadRun.isNotBlank()) preset += Pair("load_run", spec.loadRun.trim())
+            if (spec.checkpoint.isNotBlank()) preset += Pair("checkpoint", spec.checkpoint.trim())
+        }
 
         val filteredExtra = extraNoP.filterNot { (k, _) ->
             val kk = k.trim().removePrefix("--")
-            kk == "task" || kk == "num_envs"
+            kk == "task" ||
+                kk == "num_envs" ||
+                kk == "headless" ||
+                kk == "resume" ||
+                kk == "experiment_name" ||
+                kk == "load_run" ||
+                kk == "checkpoint"
         }
         val merged = preset + filteredExtra
 
@@ -83,6 +114,7 @@ object IsaacLabRunner {
             val key0 = k0.trim()
             if (key0.isEmpty()) continue
             if (key0 == "distributed" || key0 == "--distributed") haveDistributed = true
+            requireShellSafeParamKey("param key", key0)
             val isShortOpt = key0.startsWith("-") && !key0.startsWith("--")
             val key = when {
                 key0.startsWith("--") -> key0
@@ -92,10 +124,12 @@ object IsaacLabRunner {
             if (v0.isNullOrEmpty()) {
                 parts += key
             } else if (isShortOpt) {
+                requireShellSafeToken("param value", v0)
                 parts += key
-                parts += shQuote(v0)
+                parts += shQuoteIfNeeded(v0)
             } else {
-                parts += "$key=${shQuote(v0)}"
+                requireShellSafeToken("param value", v0)
+                parts += "$key=${shQuoteIfNeeded(v0)}"
             }
         }
         if (useTorchrun && !haveDistributed) parts += "--distributed"
@@ -107,12 +141,20 @@ object IsaacLabRunner {
 
         // Overlay CUDA_VISIBLE_DEVICES based on selected GPUs
         if (spec.gpuList.isNotEmpty()) {
-            envDict["CUDA_VISIBLE_DEVICES"] = spec.gpuList.joinToString(",")
+            val cuda = spec.gpuList.joinToString(",")
+            requireShellSafeToken("CUDA_VISIBLE_DEVICES", cuda)
+            envDict["CUDA_VISIBLE_DEVICES"] = cuda
+        }
+        if (spec.livestream) {
+            envDict["LIVESTREAM"] = "2"
         }
         for ((k, v) in spec.extraEnv) {
             val kk = k.trim()
             if (kk.isEmpty()) continue
             if (kk.equals("CUDA_VISIBLE_DEVICES", ignoreCase = true)) continue
+            if (kk.equals("LIVESTREAM", ignoreCase = true) && spec.livestream) continue
+            requireShellSafeEnvKey("env key", kk)
+            requireShellSafeToken("env value", v, allowEmpty = true)
             envDict[kk] = v
         }
 
@@ -121,7 +163,7 @@ object IsaacLabRunner {
             for ((k, v) in envDict) {
                 val kk = k.trim()
                 if (kk.isEmpty()) continue
-                pairs += "${kk}=${shQuote(v)}"
+                pairs += "${kk}=${shQuoteIfNeeded(v)}"
             }
             return pairs.joinToString(" ")
         }

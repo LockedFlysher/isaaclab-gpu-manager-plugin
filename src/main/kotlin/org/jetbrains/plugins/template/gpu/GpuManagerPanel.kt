@@ -20,6 +20,7 @@ import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
+import javax.swing.Box
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JFileChooser
@@ -30,6 +31,7 @@ import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.JSpinner
 import javax.swing.JTable
+import javax.swing.ScrollPaneConstants
 import javax.swing.JTextField
 import javax.swing.SpinnerNumberModel
 import javax.swing.SwingUtilities
@@ -77,12 +79,38 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
     // Runner / command preview (ported from gpu_manager_gui)
+    private val entryScriptField = JBTextField(40).apply { toolTipText = "Python entry script path for `./isaaclab.sh -p`" }
     private val taskField = JBTextField(18)
-    private val numEnvsSpin = JSpinner(SpinnerNumberModel(1, 1, 65535, 1))
-    private val gpuSelectAllBtn = JButton("All")
-    private val gpuSelectNoneBtn = JButton("None")
-    private val gpuBoxesPanel = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0))
+    private val numEnvsField = JBTextField(10).apply {
+        toolTipText = "Value for --num_envs (type a number, e.g. 8192)"
+        text = "1"
+    }
+    private val headlessCb = JCheckBox("--headless").apply {
+        toolTipText = "Run without UI rendering (recommended for remote/headless training)."
+    }
+    private val resumeCb = JCheckBox("--resume").apply {
+        toolTipText = "Resume training from a previous run (requires experiment_name/load_run/checkpoint)."
+    }
+    private val livestreamCb = JCheckBox("LIVESTREAM=2").apply {
+        toolTipText = "Enable IsaacLab livestream (sets env var LIVESTREAM=2)."
+    }
+    private val experimentNameField = JBTextField(18)
+    private val loadRunField = JBTextField(18)
+    private val checkpointField = JBTextField(18)
+    private val gpuBoxesPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.X_AXIS) }
+    private val gpuBoxesScroll = JBScrollPane(gpuBoxesPanel).apply {
+        horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
+        verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+        border = BorderFactory.createEmptyBorder()
+    }
     @Volatile private var runnerGpuBoxes: List<JCheckBox> = emptyList()
+    private val resumeDetailsPanel = JPanel(GridBagLayout())
+    private val resumeSectionPanel = JPanel(BorderLayout()).apply {
+        border = BorderFactory.createCompoundBorder(
+            BorderFactory.createTitledBorder("Options for --resume"),
+            BorderFactory.createEmptyBorder(4, 6, 6, 6),
+        )
+    }
     private val paramsModel = object : DefaultTableModel(arrayOf("Key", "Value"), 0) {
         override fun isCellEditable(row: Int, column: Int) = true
     }
@@ -117,6 +145,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         userField.horizontalAlignment = JTextField.LEFT
         keyField.horizontalAlignment = JTextField.LEFT
         nvidiaSmiPathField.horizontalAlignment = JTextField.LEFT
+        entryScriptField.horizontalAlignment = JTextField.LEFT
+        taskField.horizontalAlignment = JTextField.LEFT
+        numEnvsField.horizontalAlignment = JTextField.LEFT
+        experimentNameField.horizontalAlignment = JTextField.LEFT
+        loadRunField.horizontalAlignment = JTextField.LEFT
+        checkpointField.horizontalAlignment = JTextField.LEFT
         try { passField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (portSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (intervalSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
@@ -237,31 +271,81 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             insets = Insets(2, 4, 2, 4)
         }
 
-        val argsRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
-            add(JLabel("--task"))
-            taskField.columns = 16
-            add(taskField)
-            add(JLabel("--num_envs"))
-            try { (numEnvsSpin.editor as? JSpinner.DefaultEditor)?.textField?.columns = 6 } catch (_: Throwable) {}
-            add(numEnvsSpin)
+        fun allowShrinkField(tf: JTextField) {
+            tf.minimumSize = Dimension(0, tf.preferredSize.height)
         }
-        runnerTop.add(JLabel("Args"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(argsRow, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        allowShrinkField(entryScriptField)
+        allowShrinkField(taskField)
+        allowShrinkField(experimentNameField)
+        allowShrinkField(loadRunField)
+        allowShrinkField(checkpointField)
+
+        // Row 0: Entry (-p) full width
+        entryScriptField.columns = 40
+        runnerTop.add(JLabel("Entry (-p)"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(entryScriptField, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+
+        // Row 1: task
+        taskField.columns = 26
+        runnerTop.add(JLabel("--task"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(taskField, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+
+        // Row 2: num_envs (text input, no +/- buttons)
+        runnerTop.add(JLabel("--num_envs"), gbc(0, 2).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(numEnvsField, gbc(1, 2).apply { weightx = 0.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
+
+        // Row 3: flags split into multiple lines; keep `--resume` last.
+        val flagsRow = JPanel().apply {
+            layout = BoxLayout(this, BoxLayout.Y_AXIS)
+            alignmentX = Component.LEFT_ALIGNMENT
+            border = BorderFactory.createEmptyBorder()
+        }
+        val flagsLine1 = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+            add(headlessCb)
+        }
+        val flagsLine2 = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+            add(livestreamCb)
+        }
+        val flagsLine3 = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+            add(resumeCb)
+        }
+        flagsRow.add(flagsLine1)
+        flagsRow.add(flagsLine2)
+        flagsRow.add(flagsLine3)
+
+        // Keep flags always visually left-aligned; use the remaining space to the right for resume details.
+        val flagsAndResume = JPanel(BorderLayout(16, 0)).apply { border = BorderFactory.createEmptyBorder() }
+        flagsAndResume.add(flagsRow, BorderLayout.WEST)
+        flagsAndResume.add(resumeSectionPanel, BorderLayout.CENTER)
+        runnerTop.add(JLabel("Flags"), gbc(0, 3).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(flagsAndResume, gbc(1, 3).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+
+        // Resume details stacked vertically; shown only when resume is enabled
+        resumeDetailsPanel.removeAll()
+        fun rbc(y: Int, x: Int) = GridBagConstraints().apply {
+            gridx = x; gridy = y; insets = Insets(2, 0, 2, 8); anchor = GridBagConstraints.LINE_END
+        }
+        experimentNameField.columns = 26
+        loadRunField.columns = 26
+        checkpointField.columns = 26
+        resumeDetailsPanel.add(JLabel("--experiment_name"), rbc(0, 0))
+        resumeDetailsPanel.add(experimentNameField, rbc(0, 1).apply { weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
+        resumeDetailsPanel.add(JLabel("--load_run"), rbc(1, 0))
+        resumeDetailsPanel.add(loadRunField, rbc(1, 1).apply { weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
+        resumeDetailsPanel.add(JLabel("--checkpoint"), rbc(2, 0))
+        resumeDetailsPanel.add(checkpointField, rbc(2, 1).apply { weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
+        resumeSectionPanel.removeAll()
+        resumeSectionPanel.add(resumeDetailsPanel, BorderLayout.CENTER)
 
         val gpuRow = JPanel(BorderLayout(6, 0)).apply {
-            val left = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(gpuSelectAllBtn)
-                add(gpuSelectNoneBtn)
-            }
-            add(left, BorderLayout.WEST)
-            add(gpuBoxesPanel, BorderLayout.CENTER)
+            add(gpuBoxesScroll, BorderLayout.CENTER)
         }
-        runnerTop.add(JLabel("GPUs"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(gpuRow, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("GPUs"), gbc(0, 4).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(gpuRow, gbc(1, 4).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val paramsPanel = JPanel(BorderLayout(0, 4)).apply {
             val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JLabel("Params"))
+                add(JLabel("Additional Params"))
                 add(addParamBtn)
                 add(delParamBtn)
             }
@@ -270,7 +354,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         }
         val envPanel = JPanel(BorderLayout(0, 4)).apply {
             val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JLabel("Env"))
+                add(JLabel("Additional Env"))
                 add(addEnvBtn)
                 add(delEnvBtn)
             }
@@ -351,12 +435,26 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             override fun changedUpdate(e: DocumentEvent?) = block()
         }
         val updatePreview = { updateRunnerPreview() }
+        entryScriptField.document.addDocumentListener(docListener(updatePreview))
         taskField.document.addDocumentListener(docListener(updatePreview))
-        try { (numEnvsSpin.editor as? JSpinner.DefaultEditor)?.textField?.document?.addDocumentListener(docListener(updatePreview)) } catch (_: Throwable) {}
+        numEnvsField.document.addDocumentListener(docListener(updatePreview))
+        experimentNameField.document.addDocumentListener(docListener(updatePreview))
+        loadRunField.document.addDocumentListener(docListener(updatePreview))
+        checkpointField.document.addDocumentListener(docListener(updatePreview))
+        headlessCb.addChangeListener { updateRunnerPreview() }
+        livestreamCb.addChangeListener { updateRunnerPreview() }
+        resumeCb.addChangeListener {
+            val on = resumeCb.isSelected
+            experimentNameField.isEnabled = on
+            loadRunField.isEnabled = on
+            checkpointField.isEnabled = on
+            resumeSectionPanel.isVisible = on
+            updateRunnerPreview()
+            runnerPanel.revalidate()
+            runnerPanel.repaint()
+        }
         copyPreviewBtn.addActionListener { copyPreviewToClipboard() }
         saveRunConfigBtn.addActionListener { saveAsRunConfiguration() }
-        gpuSelectAllBtn.addActionListener { setAllRunnerGpus(true) }
-        gpuSelectNoneBtn.addActionListener { setAllRunnerGpus(false) }
         addParamBtn.addActionListener { addTableRow(paramsTable, paramsModel) }
         delParamBtn.addActionListener { deleteSelectedRows(paramsTable, paramsModel) }
         addEnvBtn.addActionListener { addTableRow(envTable, envModel) }
@@ -365,8 +463,11 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         paramsModel.addTableModelListener { updateRunnerPreview() }
         envModel.addTableModelListener { updateRunnerPreview() }
 
-        // Ensure required IsaacLab launcher parameter exists.
-        if (paramsModel.rowCount == 0) paramsModel.addRow(arrayOf("-p", ""))
+        // Default resume detail fields disabled until resume is enabled
+        experimentNameField.isEnabled = false
+        loadRunField.isEnabled = false
+        checkpointField.isEnabled = false
+        resumeSectionPanel.isVisible = false
 
         // Load persisted state
         loadStateToUi()
@@ -404,25 +505,26 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             cb.addChangeListener { updateRunnerPreview() }
             boxes += cb
             gpuBoxesPanel.add(cb)
+            if (i != count - 1) gpuBoxesPanel.add(Box.createHorizontalStrut(6))
         }
         runnerGpuBoxes = boxes
         gpuBoxesPanel.revalidate()
         gpuBoxesPanel.repaint()
     }
 
-    private fun setAllRunnerGpus(state: Boolean) {
-        for (cb in runnerGpuBoxes) {
-            cb.isSelected = state
-        }
-        updateRunnerPreview()
-    }
-
     private fun collectRunner(): IsaacLabRunnerSpec {
         val task = taskField.text.trim()
-        val numEnvs = try { (numEnvsSpin.value as Number).toInt() } catch (_: Throwable) { 0 }
+        val numEnvs = numEnvsField.text.trim().toIntOrNull() ?: 0
         return IsaacLabRunnerSpec(
+            entryScript = entryScriptField.text.trim(),
             task = task,
             numEnvs = numEnvs,
+            headless = headlessCb.isSelected,
+            resume = resumeCb.isSelected,
+            experimentName = experimentNameField.text.trim(),
+            loadRun = loadRunField.text.trim(),
+            checkpoint = checkpointField.text.trim(),
+            livestream = livestreamCb.isSelected,
             extraParams = collectParamsFromTable(),
             extraEnv = collectEnvFromTable(),
             gpuList = getRunnerSelectedGpus(),
@@ -434,8 +536,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             val r = collectRunner()
             val cmds = IsaacLabRunner.buildPreviewCommands(r)
             previewArea.text = cmds.joinToString("\n")
+            copyPreviewBtn.isEnabled = true
+            saveRunConfigBtn.isEnabled = true
         } catch (e: Exception) {
             previewArea.text = "preview error: ${e.message ?: e.javaClass.simpleName}"
+            copyPreviewBtn.isEnabled = false
+            saveRunConfigBtn.isEnabled = false
         }
     }
 
@@ -472,6 +578,13 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             st.task = runner.task
             st.numEnvs = runner.numEnvs ?: 1
             st.gpuList = runner.gpuList.joinToString(",").ifEmpty { null }
+            st.entryScript = runner.entryScript
+            st.headless = runner.headless
+            st.resume = runner.resume
+            st.experimentName = runner.experimentName
+            st.loadRun = runner.loadRun
+            st.checkpoint = runner.checkpoint
+            st.livestream = runner.livestream
             st.extraParamsText = paramsToText()
             st.extraEnvText = envToText()
             rm.addConfiguration(settings)
