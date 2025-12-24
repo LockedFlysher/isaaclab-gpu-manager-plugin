@@ -2,7 +2,7 @@ package org.jetbrains.plugins.template.gpu
 
 import com.intellij.openapi.ui.Messages
 import com.intellij.execution.RunManager
-import com.intellij.execution.configurations.ConfigurationTypeUtil
+import com.intellij.execution.configurations.ConfigurationType
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
@@ -39,6 +39,9 @@ import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.module.ModuleManager
+import com.intellij.openapi.roots.ProjectRootManager
+import org.jdom.Element
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
 import javax.swing.event.ListSelectionEvent
@@ -125,7 +128,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val delEnvBtn = JButton("–")
     private val previewArea = javax.swing.JTextArea(5, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
     private val copyPreviewBtn = JButton("Copy")
-    private val saveRunConfigBtn = JButton("Save as Run Config")
+    private val saveRunConfigBtn = JButton("Save as Python Run Config")
 
     private val gpuTableModel = object : DefaultTableModel(arrayOf("GPU", "Name", "Util", "Memory"), 0) {
         override fun isCellEditable(row: Int, column: Int) = false
@@ -558,8 +561,11 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         try {
             val runner = collectRunner()
             val ssh = formParams()
-            val type = ConfigurationTypeUtil.findConfigurationType(org.jetbrains.plugins.template.runner.IsaacLabRunConfigurationType::class.java)
-            val factory = type.configurationFactories.first()
+            val pyType = ConfigurationType.CONFIGURATION_TYPE_EP.extensionList
+                .firstOrNull { it.id == "PythonConfigurationType" }
+                ?: throw IllegalStateException("Python run configuration type not found")
+            val factory = pyType.configurationFactories.firstOrNull()
+                ?: throw IllegalStateException("Python run configuration factory not found")
             val name = buildString {
                 append("IsaacLab")
                 val task = runner.task.trim()
@@ -567,32 +573,121 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             }
             val rm = RunManager.getInstance(project)
             val settings = rm.createConfiguration(name, factory)
-            val cfg = settings.configuration as? org.jetbrains.plugins.template.runner.IsaacLabRunConfiguration
-                ?: throw IllegalStateException("unexpected configuration type")
-            val st = cfg.state
-            st.host = ssh.host
-            st.port = ssh.port
-            st.username = ssh.username
-            st.identityFile = ssh.identityFile
-            st.script = null
-            st.task = runner.task
-            st.numEnvs = runner.numEnvs ?: 1
-            st.gpuList = runner.gpuList.joinToString(",").ifEmpty { null }
-            st.entryScript = runner.entryScript
-            st.headless = runner.headless
-            st.resume = runner.resume
-            st.experimentName = runner.experimentName
-            st.loadRun = runner.loadRun
-            st.checkpoint = runner.checkpoint
-            st.livestream = runner.livestream
-            st.extraParamsText = paramsToText()
-            st.extraEnvText = envToText()
+
+            // Build a native PyCharm Python run configuration via its XML format.
+            // Note: This is local/IDE-managed (interpreter, docker/conda, env vars, debug, etc).
+            val moduleName = ModuleManager.getInstance(project).modules.firstOrNull()?.name.orEmpty()
+            val script = runner.entryScript.trim()
+            requireShellSafeToken("-p", script, allowEmpty = false)
+            val scriptValue =
+                if (script.startsWith("$") || script.startsWith("/")) script
+                else "\$PROJECT_DIR\$/$script"
+
+            val args = buildPythonParameters(runner, paramsToText())
+
+            val element = Element("configuration")
+            element.setAttribute("name", name)
+            element.setAttribute("type", "PythonConfigurationType")
+            element.setAttribute("factoryName", "Python")
+            if (moduleName.isNotEmpty()) {
+                element.addContent(Element("module").setAttribute("name", moduleName))
+            }
+            element.addContent(Element("option").setAttribute("name", "ENV_FILES").setAttribute("value", ""))
+            element.addContent(Element("option").setAttribute("name", "INTERPRETER_OPTIONS").setAttribute("value", ""))
+            element.addContent(Element("option").setAttribute("name", "PARENT_ENVS").setAttribute("value", "true"))
+            element.addContent(Element("option").setAttribute("name", "SDK_HOME").setAttribute("value", ""))
+            element.addContent(Element("option").setAttribute("name", "WORKING_DIRECTORY").setAttribute("value", "\$PROJECT_DIR\$"))
+            element.addContent(Element("option").setAttribute("name", "IS_MODULE_SDK").setAttribute("value", "true"))
+            element.addContent(Element("option").setAttribute("name", "ADD_CONTENT_ROOTS").setAttribute("value", "true"))
+            element.addContent(Element("option").setAttribute("name", "ADD_SOURCE_ROOTS").setAttribute("value", "true"))
+            element.addContent(Element("option").setAttribute("name", "SCRIPT_NAME").setAttribute("value", scriptValue))
+            element.addContent(Element("option").setAttribute("name", "PARAMETERS").setAttribute("value", args))
+
+            val envs = Element("envs")
+            if (runner.gpuList.isNotEmpty()) {
+                envs.addContent(Element("env").setAttribute("name", "CUDA_VISIBLE_DEVICES").setAttribute("value", runner.gpuList.joinToString(",")))
+            }
+            if (runner.livestream) {
+                envs.addContent(Element("env").setAttribute("name", "LIVESTREAM").setAttribute("value", "2"))
+            }
+            // Merge additional env (skip duplicates that are controlled by UI)
+            for ((k, v) in collectEnvFromTable()) {
+                val kk = k.trim()
+                if (kk.isEmpty()) continue
+                if (kk.equals("CUDA_VISIBLE_DEVICES", ignoreCase = true)) continue
+                if (kk.equals("LIVESTREAM", ignoreCase = true) && runner.livestream) continue
+                requireShellSafeEnvKey("env key", kk)
+                requireShellSafeToken("env value", v, allowEmpty = true)
+                envs.addContent(Element("env").setAttribute("name", kk).setAttribute("value", v))
+            }
+            if (envs.children.isNotEmpty()) element.addContent(envs)
+
+            settings.configuration.readExternal(element)
             rm.addConfiguration(settings)
             rm.selectedConfiguration = settings
             setStatus("Saved Run Configuration: $name")
+
+            // Hint: PyCharm needs a Python interpreter (local or SSH) to show full Python Run Config UI and to debug.
+            val sdk = ProjectRootManager.getInstance(project).projectSdk
+            val isPythonSdk = sdk?.sdkType?.name?.contains("Python", ignoreCase = true) == true
+            if (!isPythonSdk) {
+                edt {
+                    Messages.showWarningDialog(
+                        this,
+                        "Saved a Python Run Configuration, but this project has no Python interpreter configured.\n" +
+                            "Configure one in Settings | Python Interpreter (local or SSH interpreter) to get the full Run/Debug panel and debugging support.",
+                        "Python Interpreter Not Configured",
+                    )
+                }
+            }
         } catch (e: Exception) {
             edt { Messages.showWarningDialog(this, e.message ?: e.javaClass.simpleName, "Save Run Configuration Failed") }
         }
+    }
+
+    private fun buildPythonParameters(runner: IsaacLabRunnerSpec, extraParamsText: String): String {
+        val args = ArrayList<String>()
+        val task = runner.task.trim()
+        if (task.isNotEmpty()) {
+            requireShellSafeToken("--task", task)
+            args += "--task"
+            args += task
+        }
+        val nenv = runner.numEnvs ?: 0
+        if (nenv > 0) {
+            requireShellSafeToken("--num_envs", nenv.toString())
+            args += "--num_envs"
+            args += nenv.toString()
+        }
+        if (runner.headless) args += "--headless"
+        if (runner.resume) {
+            args += "--resume"
+            val en = runner.experimentName.trim()
+            val lr = runner.loadRun.trim()
+            val ck = runner.checkpoint.trim()
+            if (en.isNotEmpty()) { requireShellSafeToken("--experiment_name", en); args += "--experiment_name"; args += en }
+            if (lr.isNotEmpty()) { requireShellSafeToken("--load_run", lr); args += "--load_run"; args += lr }
+            if (ck.isNotEmpty()) { requireShellSafeToken("--checkpoint", ck); args += "--checkpoint"; args += ck }
+        }
+
+        val extra = IsaacLabRunner.parseParams(extraParamsText)
+        val drop = setOf("task", "num_envs", "headless", "resume", "experiment_name", "load_run", "checkpoint")
+        for ((k0, v0) in extra) {
+            val key0 = k0.trim()
+            if (key0.isEmpty()) continue
+            val kk = key0.removePrefix("--")
+            if (drop.contains(kk)) continue
+            requireShellSafeParamKey("param key", key0)
+            if (v0.isNullOrEmpty()) {
+                args += (if (key0.startsWith("-")) key0 else "--$key0")
+            } else {
+                requireShellSafeToken("param value", v0)
+                val key = if (key0.startsWith("-")) key0 else "--$key0"
+                args += key
+                args += v0
+            }
+        }
+        return args.joinToString(" ")
     }
 
     private fun addTableRow(table: JTable, model: DefaultTableModel) {
