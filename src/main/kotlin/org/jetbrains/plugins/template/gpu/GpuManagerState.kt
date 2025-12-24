@@ -14,6 +14,7 @@ import com.intellij.ide.passwordSafe.PasswordSafe
 class GpuManagerState : PersistentStateComponent<GpuManagerState.State> {
 
     data class State(
+        var localMode: Boolean = true,
         var host: String? = null,
         var port: Int = 22,
         var username: String? = null,
@@ -21,7 +22,6 @@ class GpuManagerState : PersistentStateComponent<GpuManagerState.State> {
         var usePassword: Boolean = false,
         var rememberPassword: Boolean = false,
         var intervalSec: Double = 5.0,
-        var nvidiaSmiPath: String? = null,
     )
 
     private var myState = State()

@@ -43,14 +43,9 @@ class SshGpuPoller(
         return Triple(rc, out, err)
     }
 
-    private fun smiExe(): String {
-        val override = params.nvidiaSmiPath?.trim().orEmpty()
-        return if (override.isNotEmpty()) shQuote(override) else "nvidia-smi"
-    }
-
     private fun fetchOnce(): Snapshot {
         val errors = mutableListOf<String>()
-        val smi = smiExe()
+        val smi = "nvidia-smi"
 
         val (rcList, outList, errList) = runRemote("LC_ALL=C LANG=C $smi -L")
         if (rcList != 0) errors += ("nvidia-smi -L failed (rc=$rcList): " + errList.trim().ifBlank { outList.trim() }.take(300))

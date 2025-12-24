@@ -16,7 +16,6 @@ data class SshParams(
     val username: String? = null,
     val identityFile: String? = null,
     val password: String? = null,
-    val nvidiaSmiPath: String? = null, // optional override for remote nvidia-smi location
     val timeoutSec: Long = 10,
 ) {
     fun isLocal(): Boolean {

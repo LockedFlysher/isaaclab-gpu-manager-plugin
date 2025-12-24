@@ -21,6 +21,7 @@ import java.awt.datatransfer.StringSelection
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.Box
+import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JCheckBox
 import javax.swing.JFileChooser
@@ -32,6 +33,7 @@ import javax.swing.JSplitPane
 import javax.swing.JSpinner
 import javax.swing.JTable
 import javax.swing.ScrollPaneConstants
+import javax.swing.JRadioButton
 import javax.swing.JTextField
 import javax.swing.SpinnerNumberModel
 import javax.swing.SwingUtilities
@@ -63,8 +65,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val usePasswordCb = JCheckBox("Password")
     private val rememberPwCb = JCheckBox("Remember")
     private val intervalSpin = JSpinner(SpinnerNumberModel(5.0, 1.0, 120.0, 1.0))
-    private val nvidiaSmiPathField = JBTextField(32)
     private val settingsPanel = JPanel(GridBagLayout())
+    private val targetLocalRb = JRadioButton("Local", true)
+    private val targetSshRb = JRadioButton("SSH", false)
+    private val targetGroup = ButtonGroup()
     private val testBtn = JButton("Test")
     private val selfTestBtn = JButton("Self-Test")
     private val connectBtn = JButton("Connect")
@@ -154,7 +158,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         hostField.horizontalAlignment = JTextField.LEFT
         userField.horizontalAlignment = JTextField.LEFT
         keyField.horizontalAlignment = JTextField.LEFT
-        nvidiaSmiPathField.horizontalAlignment = JTextField.LEFT
         entryScriptField.horizontalAlignment = JTextField.LEFT
         taskField.horizontalAlignment = JTextField.LEFT
         numEnvsField.horizontalAlignment = JTextField.LEFT
@@ -174,8 +177,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             ),
         )
         var gx = 0; var gy = 0
-        fun add(lbl: String, comp: java.awt.Component) {
-            settingsPanel.add(JLabel(lbl), GridBagConstraints().apply {
+        val sshOnly = ArrayList<Component>()
+        fun add(lbl: String, comp: java.awt.Component, sshOnlyField: Boolean = false) {
+            val label = JLabel(lbl)
+            settingsPanel.add(label, GridBagConstraints().apply {
                 gridx = gx; gridy = gy; insets = Insets(2, 4, 2, 4); anchor = GridBagConstraints.LINE_END
             })
             val row = JPanel(java.awt.BorderLayout())
@@ -183,24 +188,35 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             settingsPanel.add(row, GridBagConstraints().apply {
                 gridx = gx + 1; gridy = gy; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(2, 4, 2, 12)
             })
+            if (sshOnlyField) {
+                sshOnly += label
+                sshOnly += row
+            }
             gy += 1
         }
-        add("Host", hostField)
+
+        targetGroup.add(targetLocalRb)
+        targetGroup.add(targetSshRb)
+        val targetRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            add(targetLocalRb)
+            add(targetSshRb)
+        }
+        add("Target", targetRow, sshOnlyField = false)
+        add("Host", hostField, sshOnlyField = true)
         // Fix spinner width
         try { portSpin.preferredSize = Dimension(100, portSpin.preferredSize.height) } catch (_: Throwable) {}
-        add("Port", portSpin)
-        add("User", userField)
+        add("Port", portSpin, sshOnlyField = true)
+        add("User", userField, sshOnlyField = true)
         val keyRow = JPanel(GridBagLayout())
         keyRow.add(keyField, GridBagConstraints().apply { gridx = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(0,0,0,4) })
         keyRow.add(browseKeyBtn, GridBagConstraints().apply { gridx = 1; weightx = 0.0; anchor = GridBagConstraints.LINE_END })
-        add("Identity", keyRow)
+        add("Identity", keyRow, sshOnlyField = true)
         val pwRow = JPanel(GridBagLayout())
         pwRow.add(passField, GridBagConstraints().apply { gridx = 0; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(0,0,0,4) })
         pwRow.add(usePasswordCb, GridBagConstraints().apply { gridx = 1; weightx = 0.0; insets = Insets(0,0,0,4) })
         pwRow.add(rememberPwCb, GridBagConstraints().apply { gridx = 2; weightx = 0.0 })
-        add("Password", pwRow)
+        add("Password", pwRow, sshOnlyField = true)
         add("Interval (s)", intervalSpin)
-        add("nvidia-smi", nvidiaSmiPathField)
         add("OS", osLabel)
 
         // Put seldom-used actions inside Settings to avoid long-term header clutter.
@@ -438,6 +454,15 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         selfTestBtn.addActionListener {
             appendDebug("[ui] panel alive @ " + java.time.LocalTime.now().toString() + "\n")
         }
+        fun applyTargetUi() {
+            val local = targetLocalRb.isSelected
+            for (c in sshOnly) c.isVisible = !local
+            connectBtn.text = if (local) "Start" else "Connect"
+            // Keep settings tidy
+            revalidate(); repaint()
+        }
+        targetLocalRb.addActionListener { applyTargetUi() }
+        targetSshRb.addActionListener { applyTargetUi() }
 
         fun docListener(block: () -> Unit): DocumentListener = object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) = block()
@@ -485,6 +510,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
         // Load persisted state
         loadStateToUi()
+        applyTargetUi()
 
         // Runner tab: show a helpful placeholder until GPUs are detected.
         ensureRunnerGpuBoxes(0)
@@ -868,7 +894,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun doTest() {
         val p = formParams()
         val exec = SshExec(p)
-        val smi = p.nvidiaSmiPath?.trim()?.takeIf { it.isNotEmpty() }?.let { shQuote(it) } ?: "nvidia-smi"
+        val smi = "nvidia-smi"
         val remoteCmd = (
             "set -e; " +
             "echo \"SHELL=${'$'}SHELL\"; " +
@@ -900,16 +926,16 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         doDisconnect()
         val p = formParams()
         currentParams = p
-        setStatus("Connecting to ${buildDest(p)}:${p.port} …")
-        connSummaryLabel.text = "Connecting…"
+        val local = p.isLocal()
+        setStatus(if (local) "Starting local GPU monitor …" else "Connecting to ${buildDest(p)}:${p.port} …")
+        connSummaryLabel.text = if (local) "Local" else "Connecting…"
 
         // Persist settings
         saveUiToState()
         // OS label async
         Thread {
-            val (rc, out, err) = SshExec(p).run(
-                "(cat /etc/os-release 2>/dev/null | sed -n '1,3p') || uname -a || echo unknown"
-            )
+            val cmd = if (local) "uname -a || echo unknown" else "(cat /etc/os-release 2>/dev/null | sed -n '1,3p') || uname -a || echo unknown"
+            val (rc, out, err) = SshExec(p).run(cmd)
             val text = if (rc == 0) out.trim().lines().firstOrNull() ?: "" else (err.ifBlank { out })
             edt { osLabel.text = "OS: ${text}" }
         }.start()
@@ -961,9 +987,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         disconnectBtn.isVisible = true
         revalidate(); repaint()
 
-        val connText = "${buildDest(p)}:${p.port}"
-        connSummaryLabel.text = "Connected: " + shortenMiddle(connText, 40)
-        connSummaryLabel.toolTipText = connText
+        val connText = if (local) "local" else "${buildDest(p)}:${p.port}"
+        connSummaryLabel.text = if (local) "Local" else ("Connected: " + shortenMiddle(connText, 40))
+        connSummaryLabel.toolTipText = if (local) null else connText
         // Hide settings after connect to keep the UI focused on the GPU table.
         settingsCollapsed = true
         settingsPanel.isVisible = false
@@ -993,7 +1019,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun formParams(): SshParams {
-        val host = hostField.text.trim()
+        val localMode = targetLocalRb.isSelected
+        val host = if (localMode) "" else hostField.text.trim()
         val user = userField.text.trim().ifEmpty { null }
         val id = keyField.text.trim().ifEmpty { null }
         val pw = String(passField.password).trim().ifEmpty { null }
@@ -1004,7 +1031,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             username = user,
             identityFile = if (usePw) null else id,
             password = if (usePw) pw else null,
-            nvidiaSmiPath = nvidiaSmiPathField.text.trim().ifEmpty { null },
             timeoutSec = 10,
         )
     }
@@ -1055,6 +1081,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     // --- Persist/restore ---
     private fun loadStateToUi() {
         val st = GpuManagerState.getInstance().state
+        targetLocalRb.isSelected = st.localMode
+        targetSshRb.isSelected = !st.localMode
         hostField.text = st.host.orEmpty()
         portSpin.value = st.port
         userField.text = st.username.orEmpty()
@@ -1062,7 +1090,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         usePasswordCb.isSelected = st.usePassword
         rememberPwCb.isSelected = st.rememberPassword
         intervalSpin.value = st.intervalSec
-        nvidiaSmiPathField.text = st.nvidiaSmiPath.orEmpty()
         // Load password from Password Safe off-EDT (PasswordSafe may perform slow IO)
         if (st.rememberPassword && st.usePassword) {
             val host = st.host.orEmpty().trim()
@@ -1094,6 +1121,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun saveUiToState() {
         val st = GpuManagerState.getInstance()
         val s = st.state
+        s.localMode = targetLocalRb.isSelected
         val host = hostField.text.trim()
         val port = (portSpin.value as Number).toInt()
         val username = userField.text.trim()
@@ -1104,9 +1132,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         s.usePassword = usePasswordCb.isSelected
         s.rememberPassword = rememberPwCb.isSelected
         s.intervalSec = (intervalSpin.value as Number).toDouble()
-        s.nvidiaSmiPath = nvidiaSmiPathField.text.trim().ifEmpty { null }
         // PasswordSafe writes must not happen on EDT (SlowOperations)
-        val shouldStorePw = s.rememberPassword && s.usePassword
+        val local = s.localMode
+        val shouldStorePw = !local && s.rememberPassword && s.usePassword
         val pw = if (shouldStorePw) String(passField.password) else null
         ApplicationManager.getApplication().executeOnPooledThread {
             runCatching { GpuManagerState.getInstance().savePassword(host, port, username, pw) }
