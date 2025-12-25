@@ -30,23 +30,35 @@ object EelBash {
     }
 
     fun describeTarget(project: Project): String {
-        return runCatching {
-            val d = getEelDescriptor(project)
-            d.javaClass.methods.firstOrNull { it.name == "getUserReadableDescription" && it.parameterCount == 0 }
-                ?.invoke(d)
-                ?.toString()
-        }.getOrNull() ?: "IDE target"
+        return runCatching { describeDescriptor(getEelDescriptor(project)) }.getOrNull() ?: "IDE target"
     }
 
-    fun run(project: Project, bashScript: String, timeoutSec: Long): Triple<Int, String, String> {
+    fun run(
+        project: Project,
+        bashScript: String,
+        timeoutSec: Long,
+        onDebug: ((String) -> Unit)? = null,
+    ): Triple<Int, String, String> {
+        fun dbg(msg: String) { try { onDebug?.invoke(msg) } catch (_: Throwable) {} }
+
+        val descriptor = runCatching { getEelDescriptor(project) }.getOrElse { e ->
+            return Triple(1, "", "EEL descriptor error: ${e.message ?: e.javaClass.simpleName}")
+        }
+        dbg("eel: descriptor=${descriptor.javaClass.name}")
+        dbg("eel: target=${describeDescriptor(descriptor)}")
+
+        val t0 = System.nanoTime()
         val api = runCatching { eel(project) }.getOrElse { e -> return Triple(1, "", e.message ?: "EEL unavailable") }
+        dbg("eel: api=${api.javaClass.name} (${msSince(t0)}ms)")
 
         val exec = runCatching { api.javaClass.methods.first { it.name == "getExec" && it.parameterCount == 0 }.invoke(api) }
             .getOrElse { e -> return Triple(1, "", e.message ?: "EEL exec unavailable") }
+        dbg("eel: exec=${exec.javaClass.name}")
 
         val builder = runCatching { eelExecuteBuilder(exec, "bash") }.getOrElse { e ->
             return Triple(1, "", e.message ?: "EEL execute unavailable")
         }
+        dbg("eel: builder=${builder.javaClass.name}")
 
         // builder.args("-lc", bashScript)
         runCatching {
@@ -54,10 +66,16 @@ object EelBash {
                 ?.invoke(builder, "-lc", bashScript)
         }
 
-        val eelResult = runSuspend(timeoutSec) { cont ->
+        val tSpawn = System.nanoTime()
+        val eelResult = runSuspend<Any>(timeoutSec) { cont ->
             val m = builder.javaClass.methods.first { it.name == "eelIt" && it.parameterCount == 1 }
             m.invoke(builder, cont)
-        } ?: return Triple(124, "", "command timed out")
+        }
+        if (eelResult == null) {
+            dbg("eel: spawn/execute timed out after ${timeoutSec}s (${msSince(tSpawn)}ms)")
+            return Triple(124, "", "command timed out")
+        }
+        dbg("eel: spawn/execute returned (${msSince(tSpawn)}ms)")
 
         val clsOk = runCatching { Class.forName("com.intellij.platform.eel.EelResult\$Ok") }.getOrNull()
         val clsErr = runCatching { Class.forName("com.intellij.platform.eel.EelResult\$Error") }.getOrNull()
@@ -70,10 +88,12 @@ object EelBash {
 
         val eelProcess = runCatching { okCls.methods.first { it.name == "getValue" && it.parameterCount == 0 }.invoke(eelResult) }.getOrNull()
             ?: return Triple(1, "", "execute failed")
+        dbg("eel: process=${eelProcess.javaClass.name}")
 
         val javaProc = runCatching {
             eelProcess.javaClass.methods.first { it.name == "convertToJavaProcess" && it.parameterCount == 0 }.invoke(eelProcess) as Process
         }.getOrNull() ?: return Triple(1, "", "execute failed (no java process)")
+        dbg("eel: javaProc=${javaProc.javaClass.name}")
 
         val outBuf = StringBuilder()
         val errBuf = StringBuilder()
@@ -85,10 +105,12 @@ object EelBash {
         val ok = javaProc.waitFor(timeoutSec, TimeUnit.SECONDS)
         if (!ok) {
             runCatching { javaProc.destroyForcibly() }
+            dbg("eel: waitFor timed out after ${timeoutSec}s")
             return Triple(124, outBuf.toString(), errBuf.toString().ifBlank { "command timed out" })
         }
         tOut.join(200)
         tErr.join(200)
+        dbg("eel: exit=${javaProc.exitValue()} out=${outBuf.length} err=${errBuf.length}")
         return Triple(javaProc.exitValue(), outBuf.toString(), errBuf.toString())
     }
 
@@ -96,6 +118,12 @@ object EelBash {
         val cls = Class.forName("com.intellij.platform.eel.provider.EelProviderUtil")
         val m = cls.methods.first { it.name == "getEelDescriptor" && it.parameterCount == 1 && it.parameterTypes[0].name == Project::class.java.name }
         return m.invoke(null, project)
+    }
+
+    private fun describeDescriptor(descriptor: Any): String {
+        val m = descriptor.javaClass.methods.firstOrNull { it.name == "getUserReadableDescription" && it.parameterCount == 0 }
+        val v = runCatching { m?.invoke(descriptor) }.getOrNull()?.toString().orEmpty()
+        return v.ifBlank { "IDE target" }
     }
 
     private fun toEelApiBlocking(descriptor: Any): Any {
@@ -131,4 +159,6 @@ object EelBash {
         if (!ok) return null
         return out?.getOrNull()
     }
+
+    private fun msSince(t0: Long): Long = (System.nanoTime() - t0) / 1_000_000L
 }

@@ -29,6 +29,7 @@ data class SshParams(
 class SshExec(
     private val params: SshParams,
     private val project: com.intellij.openapi.project.Project? = null,
+    private val onDebug: ((String) -> Unit)? = null,
 ) {
 
     @Volatile private var jsch: JSch? = null
@@ -56,7 +57,7 @@ class SshExec(
         // without requiring any backend plugin installation.
         val p = project
         if (p != null) {
-            return EelBash.run(p, cmd, params.timeoutSec)
+            return EelBash.run(p, cmd, params.timeoutSec, onDebug)
         }
         val full = listOf("bash", "-lc", cmd)
         return runProcess(full)

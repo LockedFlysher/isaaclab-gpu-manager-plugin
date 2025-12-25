@@ -22,7 +22,7 @@ class SshGpuPoller(
     }
 
     private val stopFlag = AtomicBoolean(false)
-    private val exec = SshExec(params, project)
+    private val exec = SshExec(params, project, onDebug = { listener.onDebug(it) })
     @Volatile private var baselineCache: List<GpuL> = emptyList()
 
     fun requestStop() { stopFlag.set(true) }

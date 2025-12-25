@@ -27,7 +27,6 @@ import javax.swing.JCheckBox
 import javax.swing.JFileChooser
 import javax.swing.JLabel
 import javax.swing.JPanel
-import javax.swing.JPasswordField
 import javax.swing.JScrollPane
 import javax.swing.JSplitPane
 import javax.swing.JSpinner
@@ -39,6 +38,9 @@ import javax.swing.SwingConstants
 import javax.swing.JTextField
 import javax.swing.SpinnerNumberModel
 import javax.swing.SwingUtilities
+import javax.swing.JComboBox
+import javax.swing.JPasswordField
+import javax.swing.Timer
 import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
@@ -57,6 +59,15 @@ import javax.swing.event.TableColumnModelEvent
 import javax.swing.event.TableColumnModelListener
 
 class GpuManagerPanel(private val project: com.intellij.openapi.project.Project) : JBPanel<GpuManagerPanel>(BorderLayout()) {
+
+    @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
+    private val sshConfigCombo = JComboBox<String>()
+    @Volatile private var sshConfigTargets: List<DetectedGatewayTarget> = emptyList()
+    private val sshUsePasswordCb = JCheckBox("Password")
+    private val sshPasswordField = JPasswordField(18)
+    private val sshPasswordApplyTimer = Timer(450) {
+        if (sshUsePasswordCb.isSelected) restartMonitor()
+    }.apply { isRepeats = false }
 
     private val intervalSpin = JSpinner(SpinnerNumberModel(5.0, 1.0, 120.0, 1.0))
     private val settingsPanel = JPanel(GridBagLayout())
@@ -148,6 +159,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         try { loadRunField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { checkpointField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (intervalSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { sshPasswordField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
 
         // Top connection/settings panel (collapsible)
         settingsPanel.border = BorderFactory.createCompoundBorder(
@@ -180,6 +192,14 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             add(selfTestBtn)
         }
         add("Actions", actionsRow)
+
+        // Use IDE-managed SSH configs (no manual host/port input).
+        add("SSH Config", sshConfigCombo)
+        val authRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            add(sshUsePasswordCb)
+            add(sshPasswordField)
+        }
+        add("SSH Auth", authRow)
 
         val header = JPanel(BorderLayout()).apply {
             border = BorderFactory.createEmptyBorder(6, 8, 2, 8)
@@ -431,6 +451,14 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             saveUiToState()
             restartMonitor()
         }
+        sshConfigCombo.addActionListener {
+            applySelectedSshTargetToHeader()
+            restartMonitor()
+        }
+        sshUsePasswordCb.addChangeListener {
+            sshPasswordField.isEnabled = sshUsePasswordCb.isSelected
+            restartMonitor()
+        }
 
         fun docListener(block: () -> Unit): DocumentListener = object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) = block()
@@ -438,6 +466,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             override fun changedUpdate(e: DocumentEvent?) = block()
         }
         val updatePreview = { updateRunnerPreview() }
+        sshPasswordField.document.addDocumentListener(docListener {
+            if (sshUsePasswordCb.isSelected) sshPasswordApplyTimer.restart()
+        })
         entryScriptField.document.addDocumentListener(docListener(updatePreview))
         taskField.document.addDocumentListener(docListener(updatePreview))
         numEnvsField.document.addDocumentListener(docListener(updatePreview))
@@ -484,8 +515,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
         // Initial banner so user sees something immediately
         appendDebug("IsaacLab Assistant panel initialized\n")
-        connSummaryLabel.text = "Target: " + shortenMiddle(EelBash.describeTarget(project), 52)
-        connSummaryLabel.toolTipText = EelBash.describeTarget(project)
+        loadIdeSshConfigs()
+        applySelectedSshTargetToHeader()
         setStatus("UI ready")
         try {
             NotificationGroupManager.getInstance()
@@ -916,8 +947,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun doTest() {
-        val p = formParams()
-        val exec = SshExec(p, project)
+        // EEL target resolution / initial handshake can take noticeable time in Gateway.
+        // Use a larger timeout for the manual test button.
+        val p = formParams().copy(timeoutSec = 60)
+        val exec = SshExec(p, project, onDebug = { appendDebug("[eel] $it\n") })
         val smi = "nvidia-smi"
         val remoteCmd = (
             "set -e; " +
@@ -926,7 +959,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             "echo \"NVIDIA_SMI=${smi}\"; " +
             "LC_ALL=C LANG=C $smi -L || LC_ALL=C LANG=C $smi --query-gpu=index --format=csv,noheader,nounits"
         )
-        debugPane.isVisible = true; revalidate(); repaint()
+        // Always show debug for Test to avoid "timed out but no clues".
+        debugPane.isVisible = true
+        debugEnabled = true
+        revalidate(); repaint()
         Thread {
             appendDebug("[test] $ ${remoteCmd}\n")
             val (rc, out, err) = exec.run(remoteCmd)
@@ -938,6 +974,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 else -> "system ssh(agent)"
             }
             val summary = buildSshSummary(p, remoteCmd) + " [mode=$mode]"
+            if (gatewayTarget != null) appendDebug("[gateway] using ${gatewayTarget!!.host}:${gatewayTarget!!.port}\n")
             appendDebug("[test] rc=$rc\nstdout:\n$cleanedOut\n\nstderr:\n${err.trim()}\n\n$summary\n")
             if (rc == 0 && cleanedOut.isNotEmpty()) {
                 edt { Messages.showInfoMessage(this, "SSH OK\n\n$cleanedOut\n\n$summary", "Test") }
@@ -1011,8 +1048,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         revalidate(); repaint()
 
         val connText = if (local) EelBash.describeTarget(project) else "${buildDest(p)}:${p.port}"
-        connSummaryLabel.text = if (local) ("Target: " + shortenMiddle(connText, 44)) else ("Connected: " + shortenMiddle(connText, 40))
-        connSummaryLabel.toolTipText = connText
+        if (local) {
+            connSummaryLabel.text = "Target: " + shortenMiddle(connText, 44)
+            connSummaryLabel.toolTipText = connText
+        } else {
+            applySelectedSshTargetToHeader()
+        }
     }
 
     private fun stopMonitor() {
@@ -1027,6 +1068,20 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun formParams(): SshParams {
+        // Prefer Gateway-detected SSH target when available (supports non-22 ports like 50031).
+        val gt = gatewayTarget
+        if (gt != null) {
+            val usePw = sshUsePasswordCb.isSelected
+            val pw = if (usePw) String(sshPasswordField.password).trim().ifEmpty { null } else null
+            return SshParams(
+                host = gt.host,
+                port = gt.port,
+                username = gt.user,
+                identityFile = null,
+                password = pw,
+                timeoutSec = 30,
+            )
+        }
         return SshParams(
             // Always execute on the IDE "project target" via EEL (Gateway => remote backend, local IDE => local machine).
             host = "",
@@ -1034,7 +1089,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             username = null,
             identityFile = null,
             password = null,
-            timeoutSec = 10,
+            // EEL can be slower on first use, especially right after opening the project.
+            timeoutSec = 30,
         )
     }
     private fun buildDest(p: SshParams): String {
@@ -1051,6 +1107,50 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         if (!p.identityFile.isNullOrBlank()) parts += listOf("-i", p.identityFile!!)
         parts += listOf(buildDest(p), "--", "bash", "-lc", cmd)
         return parts.joinToString(" ")
+    }
+
+    private fun loadIdeSshConfigs() {
+        val targets = GatewayConnectionDetector.listTargets(project, onDebug = { appendDebug("[ssh] $it\n") })
+        sshConfigTargets = targets
+        sshConfigCombo.removeAllItems()
+        if (targets.isEmpty()) {
+            sshConfigCombo.addItem("No SSH configs found (configure in IDE)")
+            sshConfigCombo.isEnabled = false
+            gatewayTarget = null
+            return
+        }
+        sshConfigCombo.isEnabled = true
+        for (t in targets) {
+            val label = buildString {
+                val u = (t.user ?: "").trim()
+                if (u.isNotEmpty()) append(u).append("@")
+                append(t.host).append(":").append(t.port)
+            }
+            sshConfigCombo.addItem(label)
+        }
+        sshConfigCombo.selectedIndex = 0
+        gatewayTarget = targets.first()
+        sshPasswordField.isEnabled = sshUsePasswordCb.isSelected
+    }
+
+    private fun applySelectedSshTargetToHeader() {
+        val idx = sshConfigCombo.selectedIndex
+        val targets = sshConfigTargets
+        val t = if (idx in targets.indices) targets[idx] else null
+        gatewayTarget = t
+        if (t != null) {
+            val dest = buildString {
+                val u = (t.user ?: "").trim()
+                if (u.isNotEmpty()) append(u).append("@")
+                append(t.host).append(":").append(t.port)
+            }
+            connSummaryLabel.text = "SSH: " + shortenMiddle(dest, 52)
+            connSummaryLabel.toolTipText = "${t.source}: $dest"
+        } else {
+            val target = EelBash.describeTarget(project)
+            connSummaryLabel.text = "Target: " + shortenMiddle(target, 52)
+            connSummaryLabel.toolTipText = target
+        }
     }
 
     private fun shortenMiddle(s: String, maxLen: Int): String {
