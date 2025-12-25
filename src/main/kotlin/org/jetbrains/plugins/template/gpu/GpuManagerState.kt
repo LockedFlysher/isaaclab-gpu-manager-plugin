@@ -12,6 +12,7 @@ class GpuManagerState : PersistentStateComponent<GpuManagerState.State> {
 
     data class State(
         var intervalSec: Double = 5.0,
+        var lastRemoteBrowseDir: String? = null,
     )
 
     private var myState = State()

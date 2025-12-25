@@ -21,10 +21,8 @@ import java.awt.datatransfer.StringSelection
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.Box
-import javax.swing.ButtonGroup
 import javax.swing.JButton
 import javax.swing.JCheckBox
-import javax.swing.JFileChooser
 import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JScrollPane
@@ -45,8 +43,6 @@ import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.fileChooser.FileChooser
-import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
@@ -63,16 +59,13 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
     private val sshConfigCombo = JComboBox<String>()
     @Volatile private var sshConfigTargets: List<DetectedGatewayTarget> = emptyList()
-    private val sshUsePasswordCb = JCheckBox("Password")
     private val sshPasswordField = JPasswordField(18)
     private val sshPasswordApplyTimer = Timer(450) {
-        if (sshUsePasswordCb.isSelected) restartMonitor()
+        applySshPasswordToStoreAndRestart()
     }.apply { isRepeats = false }
 
     private val intervalSpin = JSpinner(SpinnerNumberModel(5.0, 1.0, 120.0, 1.0))
     private val settingsPanel = JPanel(GridBagLayout())
-    private val testBtn = JButton("Test")
-    private val selfTestBtn = JButton("Self-Test")
     private val debugToggleBtn = JButton("Debug")
     @Volatile private var debugEnabled: Boolean = true
     @Volatile private var settingsCollapsed: Boolean = false
@@ -186,20 +179,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         add("Interval (s)", intervalSpin)
         add("OS", osLabel)
 
-        // Put seldom-used actions inside Settings to avoid long-term header clutter.
-        val actionsRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(testBtn)
-            add(selfTestBtn)
-        }
-        add("Actions", actionsRow)
-
         // Use IDE-managed SSH configs (no manual host/port input).
         add("SSH Config", sshConfigCombo)
-        val authRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(sshUsePasswordCb)
-            add(sshPasswordField)
-        }
-        add("SSH Auth", authRow)
+        add("SSH Password", sshPasswordField)
 
         val header = JPanel(BorderLayout()).apply {
             border = BorderFactory.createEmptyBorder(6, 8, 2, 8)
@@ -432,7 +414,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         bottom.add(statusBar, BorderLayout.SOUTH)
         add(bottom, BorderLayout.SOUTH)
 
-        testBtn.addActionListener { doTest() }
         debugToggleBtn.addActionListener {
             debugPane.isVisible = !debugPane.isVisible
             debugEnabled = debugPane.isVisible
@@ -444,19 +425,13 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             settingsToggleBtn.toolTipText = if (settingsCollapsed) "Show settings" else "Hide settings"
             revalidate(); repaint()
         }
-        selfTestBtn.addActionListener {
-            appendDebug("[ui] panel alive @ " + java.time.LocalTime.now().toString() + "\n")
-        }
         intervalSpin.addChangeListener {
             saveUiToState()
             restartMonitor()
         }
         sshConfigCombo.addActionListener {
             applySelectedSshTargetToHeader()
-            restartMonitor()
-        }
-        sshUsePasswordCb.addChangeListener {
-            sshPasswordField.isEnabled = sshUsePasswordCb.isSelected
+            loadSavedPasswordForSelectedTarget()
             restartMonitor()
         }
 
@@ -466,9 +441,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             override fun changedUpdate(e: DocumentEvent?) = block()
         }
         val updatePreview = { updateRunnerPreview() }
-        sshPasswordField.document.addDocumentListener(docListener {
-            if (sshUsePasswordCb.isSelected) sshPasswordApplyTimer.restart()
-        })
+        sshPasswordField.document.addDocumentListener(docListener { sshPasswordApplyTimer.restart() })
         entryScriptField.document.addDocumentListener(docListener(updatePreview))
         taskField.document.addDocumentListener(docListener(updatePreview))
         numEnvsField.document.addDocumentListener(docListener(updatePreview))
@@ -517,6 +490,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         appendDebug("IsaacLab Assistant panel initialized\n")
         loadIdeSshConfigs()
         applySelectedSshTargetToHeader()
+        loadSavedPasswordForSelectedTarget()
         setStatus("UI ready")
         try {
             NotificationGroupManager.getInstance()
@@ -646,29 +620,54 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     private fun installResumeFileChoosers() {
         loadRunField.addActionListener {
-            val descriptor = FileChooserDescriptorFactory.createSingleFolderDescriptor().apply {
-                title = "Select --load_run Folder"
-                description = "Select the run directory to resume from (will be used as --load_run)."
-            }
-            val vf = FileChooser.chooseFile(descriptor, project, null) ?: return@addActionListener
-            loadRunField.text = toProjectRelativePath(vf.path)
+            val start = initialRemoteBrowseDir()
+            val dlg = RemotePathChooserDialog(
+                project = project,
+                sshParamsProvider = { formParams().copy(timeoutSec = 20) },
+                mode = RemotePathChooserDialog.Mode.Directory,
+                initialDirProvider = { start },
+                onDebug = { appendDebug("[remote-chooser] $it\n") },
+            )
+            if (!dlg.showAndGet()) return@addActionListener
+            val picked = dlg.selectedPath ?: return@addActionListener
+            saveLastRemoteBrowseDir(picked)
+            loadRunField.text = picked
             updateRunnerPreview()
         }
         checkpointField.addActionListener {
-            val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("pt").apply {
-                title = "Select --checkpoint File (.pt)"
-                description = "Select a .pt checkpoint file (will be used as --checkpoint)."
-            }
-            val vf = FileChooser.chooseFile(descriptor, project, null) ?: return@addActionListener
-            checkpointField.text = toProjectRelativePath(vf.path)
+            val start = initialRemoteBrowseDir()
+            val dlg = RemotePathChooserDialog(
+                project = project,
+                sshParamsProvider = { formParams().copy(timeoutSec = 20) },
+                mode = RemotePathChooserDialog.Mode.PtFile,
+                initialDirProvider = { start },
+                onDebug = { appendDebug("[remote-chooser] $it\n") },
+            )
+            if (!dlg.showAndGet()) return@addActionListener
+            val picked = dlg.selectedPath ?: return@addActionListener
+            saveLastRemoteBrowseDir(parentDir(picked))
+            checkpointField.text = picked
             updateRunnerPreview()
         }
     }
 
-    private fun toProjectRelativePath(absPath: String): String {
-        val base = project.basePath?.trim()?.trimEnd('/') ?: return absPath
-        val prefix = base + "/"
-        return if (absPath.startsWith(prefix)) absPath.removePrefix(prefix) else absPath
+    private fun initialRemoteBrowseDir(): String {
+        val saved = GpuManagerState.getInstance().state.lastRemoteBrowseDir?.trim().orEmpty()
+        if (saved.isNotEmpty()) return saved
+        val u = gatewayTarget?.user?.trim().orEmpty()
+        if (u.isNotEmpty()) return "/home/$u"
+        return "/home"
+    }
+
+    private fun saveLastRemoteBrowseDir(path: String) {
+        val p = path.trim()
+        if (p.isNotEmpty()) GpuManagerState.getInstance().state.lastRemoteBrowseDir = p
+    }
+
+    private fun parentDir(path: String): String {
+        val p = path.trim().trimEnd('/')
+        val idx = p.lastIndexOf('/')
+        return if (idx <= 0) "/" else p.substring(0, idx)
     }
 
     private fun updateRunnerPreview() {
@@ -946,48 +945,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         column.preferredWidth = target
     }
 
-    private fun doTest() {
-        // EEL target resolution / initial handshake can take noticeable time in Gateway.
-        // Use a larger timeout for the manual test button.
-        val p = formParams().copy(timeoutSec = 60)
-        val exec = SshExec(p, project, onDebug = { appendDebug("[eel] $it\n") })
-        val smi = "nvidia-smi"
-        val remoteCmd = (
-            "set -e; " +
-            "echo \"SHELL=${'$'}SHELL\"; " +
-            "echo \"PATH=${'$'}PATH\"; " +
-            "echo \"NVIDIA_SMI=${smi}\"; " +
-            "LC_ALL=C LANG=C $smi -L || LC_ALL=C LANG=C $smi --query-gpu=index --format=csv,noheader,nounits"
-        )
-        // Always show debug for Test to avoid "timed out but no clues".
-        debugPane.isVisible = true
-        debugEnabled = true
-        revalidate(); repaint()
-        Thread {
-            appendDebug("[test] $ ${remoteCmd}\n")
-            val (rc, out, err) = exec.run(remoteCmd)
-            val cleanedOut = out.trim()
-            val mode = when {
-                p.isLocal() -> "IDE target (EEL)"
-                !p.password.isNullOrEmpty() -> "JSch(password)"
-                !p.identityFile.isNullOrBlank() -> "JSch(key)"
-                else -> "system ssh(agent)"
-            }
-            val summary = buildSshSummary(p, remoteCmd) + " [mode=$mode]"
-            if (gatewayTarget != null) appendDebug("[gateway] using ${gatewayTarget!!.host}:${gatewayTarget!!.port}\n")
-            appendDebug("[test] rc=$rc\nstdout:\n$cleanedOut\n\nstderr:\n${err.trim()}\n\n$summary\n")
-            if (rc == 0 && cleanedOut.isNotEmpty()) {
-                edt { Messages.showInfoMessage(this, "SSH OK\n\n$cleanedOut\n\n$summary", "Test") }
-            } else if (rc == 0 && cleanedOut.isEmpty()) {
-                val msg = "SSH OK, but command produced no output.\n(see Debug for details)\n\n$summary"
-                edt { Messages.showWarningDialog(this, msg, "Test") }
-            } else {
-                val msg = (err.ifBlank { out }).ifBlank { "ssh failed rc=$rc" } + "\n(see Debug for details)\n\n$summary"
-                edt { Messages.showWarningDialog(this, msg, "Test Failed") }
-            }
-        }.start()
-    }
-
     private fun restartMonitor() {
         stopMonitor()
         val p = formParams()
@@ -1071,8 +1028,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         // Prefer Gateway-detected SSH target when available (supports non-22 ports like 50031).
         val gt = gatewayTarget
         if (gt != null) {
-            val usePw = sshUsePasswordCb.isSelected
-            val pw = if (usePw) String(sshPasswordField.password).trim().ifEmpty { null } else null
+            val pw = String(sshPasswordField.password).trim().ifEmpty { null }
             return SshParams(
                 host = gt.host,
                 port = gt.port,
@@ -1098,17 +1054,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val host = (p.host ?: "").trim()
         return if (user.isEmpty()) host else "$user@$host"
     }
-    private fun buildSshSummary(p: SshParams, cmd: String = "<cmd>"): String {
-        if (p.isLocal()) {
-            val target = shortenMiddle(EelBash.describeTarget(project), 60)
-            return "ide-target bash -lc $cmd [target=$target]"
-        }
-        val parts = mutableListOf("ssh", "-p", p.port.toString())
-        if (!p.identityFile.isNullOrBlank()) parts += listOf("-i", p.identityFile!!)
-        parts += listOf(buildDest(p), "--", "bash", "-lc", cmd)
-        return parts.joinToString(" ")
-    }
-
     private fun loadIdeSshConfigs() {
         val targets = GatewayConnectionDetector.listTargets(project, onDebug = { appendDebug("[ssh] $it\n") })
         sshConfigTargets = targets
@@ -1130,7 +1075,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         }
         sshConfigCombo.selectedIndex = 0
         gatewayTarget = targets.first()
-        sshPasswordField.isEnabled = sshUsePasswordCb.isSelected
+        // password field always enabled; empty means "use ssh-agent"
     }
 
     private fun applySelectedSshTargetToHeader() {
@@ -1151,6 +1096,32 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             connSummaryLabel.text = "Target: " + shortenMiddle(target, 52)
             connSummaryLabel.toolTipText = target
         }
+    }
+
+    private fun loadSavedPasswordForSelectedTarget() {
+        val t = gatewayTarget ?: return
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val pw = runCatching { SshPasswordStore.load(t.host, t.port, t.user) }.getOrNull().orEmpty()
+            edt {
+                // Do not overwrite what user is currently typing with a late async response.
+                if (sshPasswordField.password.isEmpty()) {
+                    sshPasswordField.text = pw
+                }
+            }
+        }
+    }
+
+    private fun applySshPasswordToStoreAndRestart() {
+        val t = gatewayTarget ?: run {
+            restartMonitor()
+            return
+        }
+        val pw = String(sshPasswordField.password).trim().ifEmpty { null }
+        // PasswordSafe is a slow operation; never touch it on EDT.
+        ApplicationManager.getApplication().executeOnPooledThread {
+            runCatching { SshPasswordStore.save(t.host, t.port, t.user, pw) }
+        }
+        restartMonitor()
     }
 
     private fun shortenMiddle(s: String, maxLen: Int): String {
