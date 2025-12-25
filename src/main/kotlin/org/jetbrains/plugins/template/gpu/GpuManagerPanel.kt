@@ -43,9 +43,11 @@ import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.roots.ProjectRootManager
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
+import com.intellij.openapi.extensions.PluginId
 import org.jdom.Element
 import javax.swing.event.DocumentEvent
 import javax.swing.event.DocumentListener
@@ -55,6 +57,11 @@ import javax.swing.event.TableColumnModelEvent
 import javax.swing.event.TableColumnModelListener
 
 class GpuManagerPanel(private val project: com.intellij.openapi.project.Project) : JBPanel<GpuManagerPanel>(BorderLayout()) {
+
+    companion object {
+        // Used to verify which build is currently loaded in the IDE (shown in debug output).
+        private const val BUILD_MARKER = "2.4.3-sftp-port-fix-v1"
+    }
 
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
     private val sshConfigCombo = JComboBox<String>()
@@ -186,7 +193,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val header = JPanel(BorderLayout()).apply {
             border = BorderFactory.createEmptyBorder(6, 8, 2, 8)
         }
-        val titleLabel = JBLabel("IsaacLab Assistant")
+        val titleLabel = JBLabel("IsaacLab Assistant").apply {
+            toolTipText = "Build: $BUILD_MARKER"
+        }
         val headerLeft = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             alignmentX = Component.LEFT_ALIGNMENT
@@ -487,7 +496,15 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         ensureRunnerGpuBoxes(0)
 
         // Initial banner so user sees something immediately
-        appendDebug("IsaacLab Assistant panel initialized\n")
+        appendDebug("IsaacLab Assistant panel initialized [$BUILD_MARKER]\n")
+        try {
+            val pd = PluginManagerCore.getPlugin(PluginId.getId("com.sunnypea.isaaclab.assistant"))
+            val v = pd?.version ?: "unknown"
+            appendDebug("plugin: com.sunnypea.isaaclab.assistant@$v\n")
+            setStatus("Loaded IsaacLab Assistant $v ($BUILD_MARKER)")
+        } catch (t: Throwable) {
+            appendDebug("plugin: version detect failed: ${t.javaClass.simpleName}: ${t.message}\n")
+        }
         loadIdeSshConfigs()
         applySelectedSshTargetToHeader()
         loadSavedPasswordForSelectedTarget()
@@ -619,36 +636,50 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun installResumeFileChoosers() {
-        loadRunField.addActionListener {
-            val start = initialRemoteBrowseDir()
-            val dlg = RemotePathChooserDialog(
+        // This line is intentionally always printed so users can confirm they are running
+        // a build that contains the remote SFTP browser fixes.
+        appendDebug("[browse] hooks installed\n")
+
+        fun chooseAndApply(kind: String, mode: SftpBrowserChooser.Mode) {
+            appendDebug("[browse] click: $kind\n")
+            val picked = SftpBrowserChooser.choose(
                 project = project,
-                sshParamsProvider = { formParams().copy(timeoutSec = 20) },
-                mode = RemotePathChooserDialog.Mode.Directory,
-                initialDirProvider = { start },
-                onDebug = { appendDebug("[remote-chooser] $it\n") },
+                params = formParams().copy(timeoutSec = 20),
+                initialPath = initialRemoteBrowseDir(),
+                mode = mode,
+                onDebug = { appendDebug("[browse] $it\n") },
             )
-            if (!dlg.showAndGet()) return@addActionListener
-            val picked = dlg.selectedPath ?: return@addActionListener
-            saveLastRemoteBrowseDir(picked)
-            loadRunField.text = picked
+            if (picked.isNullOrBlank()) {
+                appendDebug("[browse] result: <none>\n")
+                return
+            }
+
+            when (mode) {
+                SftpBrowserChooser.Mode.Directory -> {
+                    saveLastRemoteBrowseDir(picked)
+                    loadRunField.text = picked
+                }
+                SftpBrowserChooser.Mode.PtFile -> {
+                    if (!picked.endsWith(".pt")) {
+                        Messages.showWarningDialog(this, "Please select a .pt file", "Invalid Checkpoint")
+                        appendDebug("[browse] result rejected (not .pt): '$picked'\n")
+                        return
+                    }
+                    saveLastRemoteBrowseDir(parentDir(picked))
+                    checkpointField.text = picked
+                }
+            }
+            appendDebug("[browse] result: '$picked'\n")
             updateRunnerPreview()
         }
-        checkpointField.addActionListener {
-            val start = initialRemoteBrowseDir()
-            val dlg = RemotePathChooserDialog(
-                project = project,
-                sshParamsProvider = { formParams().copy(timeoutSec = 20) },
-                mode = RemotePathChooserDialog.Mode.PtFile,
-                initialDirProvider = { start },
-                onDebug = { appendDebug("[remote-chooser] $it\n") },
-            )
-            if (!dlg.showAndGet()) return@addActionListener
-            val picked = dlg.selectedPath ?: return@addActionListener
-            saveLastRemoteBrowseDir(parentDir(picked))
-            checkpointField.text = picked
-            updateRunnerPreview()
-        }
+
+        // TextFieldWithBrowseButton has slightly different event sources between IDE versions.
+        // Hook both the browse button (addActionListener) and the text field (Enter key).
+        loadRunField.addActionListener { chooseAndApply("load_run", SftpBrowserChooser.Mode.Directory) }
+        loadRunField.textField.addActionListener { chooseAndApply("load_run(text)", SftpBrowserChooser.Mode.Directory) }
+
+        checkpointField.addActionListener { chooseAndApply("checkpoint", SftpBrowserChooser.Mode.PtFile) }
+        checkpointField.textField.addActionListener { chooseAndApply("checkpoint(text)", SftpBrowserChooser.Mode.PtFile) }
     }
 
     private fun initialRemoteBrowseDir(): String {
@@ -660,7 +691,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun saveLastRemoteBrowseDir(path: String) {
-        val p = path.trim()
+        val p0 = path.trim()
+        val p = if (p0.startsWith("/")) p0 else "/$p0"
         if (p.isNotEmpty()) GpuManagerState.getInstance().state.lastRemoteBrowseDir = p
     }
 
