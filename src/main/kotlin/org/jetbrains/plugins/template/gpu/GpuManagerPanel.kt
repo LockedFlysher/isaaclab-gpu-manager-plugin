@@ -34,6 +34,8 @@ import javax.swing.JSpinner
 import javax.swing.JTable
 import javax.swing.ScrollPaneConstants
 import javax.swing.JRadioButton
+import javax.swing.JToggleButton
+import javax.swing.SwingConstants
 import javax.swing.JTextField
 import javax.swing.SpinnerNumberModel
 import javax.swing.SwingUtilities
@@ -111,13 +113,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val checkpointField = TextFieldWithBrowseButton(JBTextField(18)).apply {
         toolTipText = "Checkpoint file for --checkpoint (select a .pt file)"
     }
-    private val gpuBoxesPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.X_AXIS) }
-    private val gpuBoxesScroll = JBScrollPane(gpuBoxesPanel).apply {
-        horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_AS_NEEDED
-        verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER
+    private val gpuBoxesPanel = JPanel(WrapLayout(FlowLayout.LEFT, 6, 4)).apply {
         border = BorderFactory.createEmptyBorder()
     }
-    @Volatile private var runnerGpuBoxes: List<JCheckBox> = emptyList()
+    @Volatile private var runnerGpuButtons: List<JToggleButton> = emptyList()
     private val resumeDetailsPanel = JPanel(GridBagLayout())
     private val resumeSectionPanel = JPanel(BorderLayout()).apply {
         border = BorderFactory.createCompoundBorder(
@@ -146,7 +145,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
     private val gpuTable = JTable(gpuTableModel)
     private val gpuScroll = JBScrollPane(gpuTable)
-    private val runnerPanel = JPanel(BorderLayout())
+    private val runnerPanel = JPanel().apply { layout = BoxLayout(this, BoxLayout.Y_AXIS) }
 
     @Volatile private var poller: SshGpuPoller? = null
     @Volatile private var currentParams: SshParams? = null
@@ -242,9 +241,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             add(settingsToggleBtn)
             add(debugToggleBtn)
         }
-        // Separate rows to avoid overlap in narrow toolwindows.
-        header.add(headerLeft, BorderLayout.CENTER)
-        header.add(headerButtons, BorderLayout.SOUTH)
+        // Buttons default to the top-right corner.
+        val headerButtonsWrap = JPanel(BorderLayout()).apply {
+            add(headerButtons, BorderLayout.NORTH)
+        }
+        header.add(headerLeft, BorderLayout.WEST)
+        header.add(headerButtonsWrap, BorderLayout.EAST)
 
         val topContainer = JPanel(BorderLayout())
         topContainer.add(header, BorderLayout.NORTH)
@@ -364,27 +366,17 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         resumeSectionPanel.add(resumeDetailsPanel, BorderLayout.CENTER)
 
         val gpuRow = JPanel(BorderLayout(6, 0)).apply {
-            add(gpuBoxesScroll, BorderLayout.CENTER)
+            add(gpuBoxesPanel, BorderLayout.CENTER)
         }
         runnerTop.add(JLabel("GPUs"), gbc(0, 4).apply { anchor = GridBagConstraints.LINE_END })
         runnerTop.add(gpuRow, gbc(1, 4).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val paramsPanel = JPanel(BorderLayout(0, 4)).apply {
-            val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JLabel("Additional Params"))
-                add(addParamBtn)
-                add(delParamBtn)
-            }
-            add(top, BorderLayout.NORTH)
+            add(makeAdditionalHeader("Additional Params", addParamBtn, delParamBtn), BorderLayout.NORTH)
             add(JBScrollPane(paramsTable), BorderLayout.CENTER)
         }
         val envPanel = JPanel(BorderLayout(0, 4)).apply {
-            val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-                add(JLabel("Additional Env"))
-                add(addEnvBtn)
-                add(delEnvBtn)
-            }
-            add(top, BorderLayout.NORTH)
+            add(makeAdditionalHeader("Additional Env", addEnvBtn, delEnvBtn), BorderLayout.NORTH)
             add(JBScrollPane(envTable), BorderLayout.CENTER)
         }
         val midSplit = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, paramsPanel, envPanel).apply {
@@ -402,13 +394,58 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             add(JBScrollPane(previewArea), BorderLayout.CENTER)
         }
 
-        runnerPanel.add(runnerTop, BorderLayout.NORTH)
-        runnerPanel.add(midSplit, BorderLayout.CENTER)
-        runnerPanel.add(runnerBottom, BorderLayout.SOUTH)
+        fun updateAdditionalTablesHeights() {
+            fun desiredTableHeight(table: JTable, rows: Int): Int {
+                val headerH = table.tableHeader?.preferredSize?.height ?: 24
+                return headerH + (table.rowHeight.coerceAtLeast(18) * rows)
+            }
+
+            val rowsParams = when {
+                paramsModel.rowCount <= 0 -> 2
+                paramsModel.rowCount <= 4 -> paramsModel.rowCount.coerceAtLeast(2)
+                else -> 5
+            }
+            val rowsEnv = when {
+                envModel.rowCount <= 0 -> 2
+                envModel.rowCount <= 4 -> envModel.rowCount.coerceAtLeast(2)
+                else -> 5
+            }
+
+            val h = maxOf(desiredTableHeight(paramsTable, rowsParams), desiredTableHeight(envTable, rowsEnv))
+            paramsTable.preferredScrollableViewportSize = Dimension(400, h)
+            envTable.preferredScrollableViewportSize = Dimension(400, h)
+
+            // Keep the split pane compact when empty.
+            val midH = (h + 42).coerceAtMost(260)
+            midSplit.preferredSize = Dimension(0, midH)
+            midSplit.maximumSize = Dimension(Int.MAX_VALUE, midH)
+        }
+
+        // Let Runner shrink/grow naturally; scroll when needed.
+        runnerTop.alignmentX = Component.LEFT_ALIGNMENT
+        midSplit.alignmentX = Component.LEFT_ALIGNMENT
+        runnerBottom.alignmentX = Component.LEFT_ALIGNMENT
+        runnerBottom.maximumSize = Dimension(Int.MAX_VALUE, 220)
+
+        runnerPanel.add(runnerTop)
+        runnerPanel.add(Box.createVerticalStrut(6))
+        runnerPanel.add(midSplit)
+        runnerPanel.add(Box.createVerticalStrut(8))
+        runnerPanel.add(runnerBottom)
+
+        updateAdditionalTablesHeights()
+        paramsModel.addTableModelListener { updateAdditionalTablesHeights() }
+        envModel.addTableModelListener { updateAdditionalTablesHeights() }
+
+        val runnerScroll = JBScrollPane(runnerPanel).apply {
+            horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER
+            verticalScrollBarPolicy = ScrollPaneConstants.VERTICAL_SCROLLBAR_AS_NEEDED
+            border = BorderFactory.createEmptyBorder()
+        }
 
         val tabs = JBTabbedPane().apply {
             addTab("Monitor", gpuScroll)
-            addTab("Runner", runnerPanel)
+            addTab("Runner", runnerScroll)
         }
         add(tabs, BorderLayout.CENTER)
 
@@ -529,10 +566,35 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         installResumeFileChoosers()
     }
 
+    private fun makeAdditionalHeader(title: String, addBtn: JButton, delBtn: JButton): JPanel {
+        // Keep +/- buttons visible even in a narrow toolwindow:
+        // - label is on WEST and allowed to shrink
+        // - buttons are on EAST and keep their preferred size
+        val label = JBLabel(title).apply {
+            foreground = JBColor.GRAY
+            minimumSize = Dimension(0, preferredSize.height)
+        }
+        fun tighten(b: JButton) {
+            b.margin = Insets(2, 6, 2, 6)
+            b.isFocusable = false
+        }
+        tighten(addBtn)
+        tighten(delBtn)
+        val buttons = JPanel(FlowLayout(FlowLayout.RIGHT, 4, 0)).apply {
+            add(addBtn)
+            add(delBtn)
+        }
+        return JPanel(BorderLayout()).apply {
+            add(label, BorderLayout.WEST)
+            add(buttons, BorderLayout.EAST)
+        }
+    }
+
     private fun getRunnerSelectedGpus(): List<Int> {
         val out = ArrayList<Int>()
-        for ((i, cb) in runnerGpuBoxes.withIndex()) {
-            if (cb.isSelected) out += i
+        for (b in runnerGpuButtons) {
+            val idx = (b.actionCommand ?: "").toIntOrNull()
+            if (idx != null && b.isSelected) out += idx
         }
         return out
     }
@@ -543,31 +605,60 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         if (count == 0) {
             val msg = if (poller == null) "Connect to detect GPUs" else "No GPUs detected"
             val already =
-                runnerGpuBoxes.isEmpty() &&
+                runnerGpuButtons.isEmpty() &&
                     gpuBoxesPanel.componentCount == 1 &&
                     (gpuBoxesPanel.getComponent(0) as? JBLabel)?.text == msg
             if (already) return
             gpuBoxesPanel.removeAll()
-            runnerGpuBoxes = emptyList()
+            runnerGpuButtons = emptyList()
             gpuBoxesPanel.add(JBLabel(msg).apply { foreground = JBColor.GRAY })
             gpuBoxesPanel.revalidate()
             gpuBoxesPanel.repaint()
             return
         }
-        if (runnerGpuBoxes.size == count) return
+        if (runnerGpuButtons.size == count) return
         gpuBoxesPanel.removeAll()
-        val boxes = ArrayList<JCheckBox>(count)
+        val buttons = ArrayList<JToggleButton>(count)
         for (i in 0 until count) {
-            val cb = JCheckBox(i.toString())
-            cb.isSelected = prev.contains(i)
-            cb.addChangeListener { updateRunnerPreview() }
-            boxes += cb
-            gpuBoxesPanel.add(cb)
-            if (i != count - 1) gpuBoxesPanel.add(Box.createHorizontalStrut(6))
+            val icon = GpuUsageIcon(i)
+            val b = JToggleButton().apply {
+                actionCommand = i.toString()
+                isSelected = prev.contains(i)
+                this.icon = icon
+                toolTipText = "GPU $i"
+                horizontalAlignment = SwingConstants.LEFT
+                margin = Insets(0, 0, 0, 0)
+                isFocusable = false
+            }
+            b.addChangeListener { updateRunnerPreview() }
+            buttons += b
+            gpuBoxesPanel.add(b)
         }
-        runnerGpuBoxes = boxes
+        runnerGpuButtons = buttons
         gpuBoxesPanel.revalidate()
         gpuBoxesPanel.repaint()
+    }
+
+    private fun updateRunnerGpuUsage(gpus: List<GpuInfo>) {
+        if (runnerGpuButtons.isEmpty()) return
+        val byIndex = gpus.associateBy { it.index }
+        for (b in runnerGpuButtons) {
+            val idx = (b.actionCommand ?: "").toIntOrNull() ?: continue
+            val info = byIndex[idx]
+            val icon = b.icon as? GpuUsageIcon ?: continue
+            if (info != null) {
+                icon.utilPercent = info.utilPercent
+                icon.memUsedMiB = info.memUsedMiB
+                icon.memTotalMiB = info.memTotalMiB
+                b.toolTipText = "GPU ${info.index}: ${info.name} | util ${info.utilPercent}% | mem ${info.memUsedMiB} / ${info.memTotalMiB} MiB"
+            } else {
+                icon.utilPercent = 0
+                icon.memUsedMiB = 0
+                icon.memTotalMiB = 0
+                b.toolTipText = "GPU $idx"
+            }
+            b.repaint()
+        }
     }
 
     private fun collectRunner(): IsaacLabRunnerSpec {
@@ -907,7 +998,12 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             appendDebug("[test] $ ${remoteCmd}\n")
             val (rc, out, err) = exec.run(remoteCmd)
             val cleanedOut = out.trim()
-            val mode = if (!p.password.isNullOrEmpty()) "JSch(password)" else "system ssh"
+            val mode = when {
+                p.isLocal() -> "local"
+                !p.password.isNullOrEmpty() -> "JSch(password)"
+                !p.identityFile.isNullOrBlank() -> "JSch(key)"
+                else -> "system ssh(agent)"
+            }
             val summary = buildSshSummary(p, remoteCmd) + " [mode=$mode]"
             appendDebug("[test] rc=$rc\nstdout:\n$cleanedOut\n\nstderr:\n${err.trim()}\n\n$summary\n")
             if (rc == 0 && cleanedOut.isNotEmpty()) {
@@ -957,6 +1053,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                     }
                     snapshotToTables(show)
                     ensureRunnerGpuBoxes(show.gpus.size)
+                    updateRunnerGpuUsage(show.gpus)
                     lastSnapshot = show
                     val now = java.time.LocalTime.now().withNano(0).toString()
                     if (s.errors.isNotEmpty()) {

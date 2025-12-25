@@ -9,7 +9,7 @@
     <resource-bundle>messages.MyBundle</resource-bundle>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow factoryClass="org.jetbrains.plugins.template.toolWindow.MyToolWindowFactory" id="IsaacLab Assistant" anchor="left"/>
+        <toolWindow factoryClass="org.jetbrains.plugins.template.toolWindow.MyToolWindowFactory" id="IsaacLab Assistant" anchor="right"/>
         <notificationGroup id="IsaacLabAssistant" displayType="BALLOON" isLogByDefault="true"/>
     </extensions>
 </idea-plugin>

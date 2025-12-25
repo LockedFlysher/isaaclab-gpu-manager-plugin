@@ -7,6 +7,8 @@ import java.io.BufferedReader
 import java.io.OutputStream
 import java.io.InputStreamReader
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Paths
 import java.util.Properties
 import java.util.concurrent.TimeUnit
 
@@ -51,8 +53,9 @@ class SshExec(private val params: SshParams) {
     }
 
     private fun runViaSsh(remoteCmd: String): Triple<Int, String, String> {
-        // Always use JSch with an interactive shell channel (PTY) to match behavior of an interactive SSH session.
-        return runViaJschShell(remoteCmd)
+        // If user didn't provide password or key, rely on system ssh to use ssh-agent (JSch doesn't support it here).
+        val needAgent = params.password.isNullOrEmpty() && params.identityFile.isNullOrBlank()
+        return if (needAgent) runViaSystemSshPty(remoteCmd) else runViaJschShell(remoteCmd)
     }
 
     private fun ensureShell(): Pair<OutputStream, java.io.InputStream> {
@@ -132,24 +135,8 @@ class SshExec(private val params: SshParams) {
                     if (n < 0) break
                     sb.append(String(buf, 0, n, StandardCharsets.UTF_8))
                 }
-                val text = sb.toString()
-                val bi = text.indexOf(begin)
-                if (bi >= 0) {
-                    val ei = text.indexOf(end, bi + begin.length)
-                    if (ei >= 0) {
-                        val lf = text.indexOf('\n', ei)
-                        val afterEnd = if (lf >= 0) lf else text.length
-                        if (afterEnd > ei) {
-                            val rcStr = text.substring(ei + end.length, afterEnd).trim().trimEnd('\r')
-                            val rc = rcStr.toIntOrNull() ?: 0
-                            val bodyStart = text.indexOf('\n', bi)
-                            val body = if (bodyStart >= 0 && bodyStart + 1 <= ei) {
-                                text.substring(bodyStart + 1, ei).trimEnd()
-                            } else ""
-                            return Triple(rc, body, "")
-                        }
-                    }
-                }
+                val parsed = parseMarkerTranscript(sb.toString(), begin, end)
+                if (parsed != null) return Triple(parsed.first, parsed.second, "")
                 Thread.sleep(20)
             }
             Triple(124, "", "command timed out")
@@ -157,6 +144,94 @@ class SshExec(private val params: SshParams) {
             close()
             Triple(1, "", e.message ?: e.javaClass.simpleName)
         }
+    }
+
+    private fun runViaSystemSshPty(remoteCmd: String): Triple<Int, String, String> {
+        val host = (params.host ?: "").trim()
+        if (host.isEmpty()) return Triple(1, "", "host is required")
+        val user = (params.username ?: "").trim().ifEmpty { System.getProperty("user.name") ?: "" }
+        if (user.isEmpty()) return Triple(1, "", "username is required")
+        val dest = "$user@$host"
+
+        // Force PTY so PATH/module/etc matches interactive ssh as closely as possible.
+        val token = "__GPU_MGR_${System.nanoTime()}__"
+        val begin = "$token:BEGIN"
+        val end = "$token:END:"
+        val wrapped = (
+            "printf %s\\\\n ${shQuote(begin)}; " +
+                "{ $remoteCmd; RC=${'$'}?; } 2>&1; " +
+                "printf %s%s\\\\n ${shQuote(end)} ${'$'}RC"
+            )
+
+        val cmd = ArrayList<String>()
+        cmd += "ssh"
+        cmd += "-tt"
+        cmd += "-p"
+        cmd += params.port.toString()
+        cmd += "-o"
+        cmd += "BatchMode=yes"
+        cmd += "-o"
+        cmd += "StrictHostKeyChecking=no"
+        cmd += "-o"
+        cmd += "UserKnownHostsFile=/dev/null"
+        cmd += "-o"
+        cmd += "LogLevel=ERROR"
+        // If identityFile was provided, pass it through even in system-ssh mode.
+        val id = params.identityFile?.trim().orEmpty()
+        if (id.isNotEmpty()) {
+            val p = Paths.get(id)
+            if (Files.exists(p)) {
+                cmd += "-i"
+                cmd += id
+            }
+        }
+        cmd += dest
+        cmd += "--"
+        cmd += "bash"
+        cmd += "-lc"
+        cmd += wrapped
+
+        val (rc0, out0, err0) = runProcess(cmd)
+        val text = (out0 + "\n" + err0).trimEnd()
+        val parsed = parseMarkerTranscript(text, begin, end)
+        if (parsed != null) return Triple(parsed.first, parsed.second, "")
+        // Fallback: couldn't parse markers; return combined output for diagnosis.
+        return Triple(if (rc0 == 0) 1 else rc0, out0, err0.ifBlank { "ssh output parse failed" })
+    }
+
+    /**
+     * Parse marker-delimited output in a way that is resilient to PTY echo.
+     *
+     * We only accept a marker when it appears as its own line, e.g.:
+     *   <BEGIN>
+     *   ... output ...
+     *   <END>:<rc>
+     *
+     * This avoids false-positives when the terminal echoes the typed command line containing the marker strings.
+     */
+    private fun parseMarkerTranscript(text: String, beginLine: String, endPrefix: String): Pair<Int, String>? {
+        val lines = text.lineSequence().toList()
+        var beginIdx = -1
+        for ((i, raw) in lines.withIndex()) {
+            val ln = raw.trimEnd('\r')
+            if (ln == beginLine) {
+                beginIdx = i
+                break
+            }
+        }
+        if (beginIdx < 0) return null
+        for (j in beginIdx + 1 until lines.size) {
+            val ln = lines[j].trimEnd('\r')
+            if (ln.startsWith(endPrefix)) {
+                val rcStr = ln.removePrefix(endPrefix).trim()
+                val rc = rcStr.toIntOrNull() ?: 0
+                val body = lines.subList(beginIdx + 1, j)
+                    .joinToString("\n") { it.trimEnd('\r') }
+                    .trimEnd()
+                return Pair(rc, body)
+            }
+        }
+        return null
     }
 
     private fun runProcess(cmd: List<String>): Triple<Int, String, String> {
