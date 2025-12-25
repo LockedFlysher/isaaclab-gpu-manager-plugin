@@ -60,7 +60,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     companion object {
         // Used to verify which build is currently loaded in the IDE (shown in debug output).
-        private const val BUILD_MARKER = "2.4.4-gpu-select-visibility-v1"
+        private const val BUILD_MARKER = "2.4.5-runner-compact-gpu-wrap-v1"
     }
 
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
@@ -111,7 +111,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val checkpointField = TextFieldWithBrowseButton(JBTextField(18)).apply {
         toolTipText = "Checkpoint file for --checkpoint (select a .pt file)"
     }
-    private val gpuBoxesPanel = JPanel(WrapLayout(FlowLayout.LEFT, 6, 4)).apply {
+    private val gpuBoxesPanel = JPanel(WrapLayout(FlowLayout.LEFT, 2, 2)).apply {
         border = BorderFactory.createEmptyBorder()
     }
     @Volatile private var runnerGpuButtons: List<JToggleButton> = emptyList()
@@ -585,8 +585,10 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 horizontalAlignment = SwingConstants.LEFT
                 margin = Insets(0, 0, 0, 0)
                 isFocusable = false
+                isFocusPainted = false
                 isContentAreaFilled = false
                 isBorderPainted = false
+                border = BorderFactory.createEmptyBorder(0, 0, 0, 0)
             }
             b.addChangeListener {
                 icon.selected = b.isSelected
