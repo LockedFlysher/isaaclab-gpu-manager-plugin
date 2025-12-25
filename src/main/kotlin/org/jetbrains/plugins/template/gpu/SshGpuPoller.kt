@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class SshGpuPoller(
     private val params: SshParams,
+    private val project: com.intellij.openapi.project.Project?,
     private val intervalSec: Double = 5.0,
     private val listener: Listener,
 ) : Thread("gpu-poller") {
@@ -21,7 +22,7 @@ class SshGpuPoller(
     }
 
     private val stopFlag = AtomicBoolean(false)
-    private val exec = SshExec(params)
+    private val exec = SshExec(params, project)
     @Volatile private var baselineCache: List<GpuL> = emptyList()
 
     fun requestStop() { stopFlag.set(true) }

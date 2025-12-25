@@ -26,7 +26,10 @@ data class SshParams(
     }
 }
 
-class SshExec(private val params: SshParams) {
+class SshExec(
+    private val params: SshParams,
+    private val project: com.intellij.openapi.project.Project? = null,
+) {
 
     @Volatile private var jsch: JSch? = null
     @Volatile private var session: Session? = null
@@ -48,6 +51,13 @@ class SshExec(private val params: SshParams) {
     }
 
     private fun runLocal(cmd: String): Triple<Int, String, String> {
+        // In Gateway / Remote Dev, the plugin UI runs on the frontend (often macOS),
+        // but the *project target* is the remote backend (Linux). EEL runs on the project target
+        // without requiring any backend plugin installation.
+        val p = project
+        if (p != null) {
+            return EelBash.run(p, cmd, params.timeoutSec)
+        }
         val full = listOf("bash", "-lc", cmd)
         return runProcess(full)
     }

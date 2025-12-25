@@ -1,6 +1,6 @@
 <!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <id>org.jetbrains.plugins.template</id>
+    <id>com.sunnypea.isaaclab.assistant</id>
     <name>IsaacLab Assistant</name>
     <vendor>IsaacLab</vendor>
 
