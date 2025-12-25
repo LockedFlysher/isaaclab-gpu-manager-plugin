@@ -13,7 +13,7 @@ import java.util.concurrent.TimeUnit
  */
 object SftpBrowserChooser {
 
-    enum class Mode { Directory, PtFile }
+    enum class Mode { Directory, PtFile, PyFile }
 
     fun choose(
         project: Project,

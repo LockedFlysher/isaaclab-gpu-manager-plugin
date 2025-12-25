@@ -60,7 +60,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     companion object {
         // Used to verify which build is currently loaded in the IDE (shown in debug output).
-        private const val BUILD_MARKER = "2.4.5-runner-compact-gpu-wrap-v1"
+        private const val BUILD_MARKER = "2.4.7-run-config-python-factory-v1"
     }
 
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
@@ -89,7 +89,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
     // Runner / command preview (ported from gpu_manager_gui)
-    private val entryScriptField = JBTextField(40).apply { toolTipText = "Python entry script path for `./isaaclab.sh -p`" }
+    private val entryScriptField = TextFieldWithBrowseButton(JBTextField(40)).apply {
+        toolTipText = "Python entry script path for `./isaaclab.sh -p` (select a .py file)"
+    }
     private val taskField = JBTextField(18)
     private val numEnvsField = JBTextField(10).apply {
         toolTipText = "Value for --num_envs (type a number, e.g. 8192)"
@@ -152,7 +154,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     init {
         // Consistent left alignment for all input fields (including spinner editors)
-        entryScriptField.horizontalAlignment = JTextField.LEFT
+        try { entryScriptField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         taskField.horizontalAlignment = JTextField.LEFT
         numEnvsField.horizontalAlignment = JTextField.LEFT
         experimentNameField.horizontalAlignment = JTextField.LEFT
@@ -267,14 +269,14 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         fun allowShrinkField(tf: JTextField) {
             tf.minimumSize = Dimension(0, tf.preferredSize.height)
         }
-        allowShrinkField(entryScriptField)
+        allowShrinkField(entryScriptField.textField)
         allowShrinkField(taskField)
         allowShrinkField(experimentNameField)
         allowShrinkField(loadRunField.textField)
         allowShrinkField(checkpointField.textField)
 
         // Row 0: Entry (-p) full width
-        entryScriptField.columns = 40
+        entryScriptField.textField.columns = 40
         runnerTop.add(JLabel("Entry (-p)"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
         runnerTop.add(entryScriptField, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
@@ -451,7 +453,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         }
         val updatePreview = { updateRunnerPreview() }
         sshPasswordField.document.addDocumentListener(docListener { sshPasswordApplyTimer.restart() })
-        entryScriptField.document.addDocumentListener(docListener(updatePreview))
+        entryScriptField.textField.document.addDocumentListener(docListener(updatePreview))
         taskField.document.addDocumentListener(docListener(updatePreview))
         numEnvsField.document.addDocumentListener(docListener(updatePreview))
         experimentNameField.document.addDocumentListener(docListener(updatePreview))
@@ -677,6 +679,15 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                     saveLastRemoteBrowseDir(parentDir(picked))
                     checkpointField.text = picked
                 }
+                SftpBrowserChooser.Mode.PyFile -> {
+                    if (!picked.endsWith(".py")) {
+                        Messages.showWarningDialog(this, "Please select a .py file", "Invalid Entry Script")
+                        appendDebug("[browse] result rejected (not .py): '$picked'\n")
+                        return
+                    }
+                    saveLastRemoteBrowseDir(parentDir(picked))
+                    entryScriptField.text = picked
+                }
             }
             appendDebug("[browse] result: '$picked'\n")
             updateRunnerPreview()
@@ -684,6 +695,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
         // TextFieldWithBrowseButton has slightly different event sources between IDE versions.
         // Hook both the browse button (addActionListener) and the text field (Enter key).
+        entryScriptField.addActionListener { chooseAndApply("entry_script", SftpBrowserChooser.Mode.PyFile) }
+        entryScriptField.textField.addActionListener { chooseAndApply("entry_script(text)", SftpBrowserChooser.Mode.PyFile) }
+
         loadRunField.addActionListener { chooseAndApply("load_run", SftpBrowserChooser.Mode.Directory) }
         loadRunField.textField.addActionListener { chooseAndApply("load_run(text)", SftpBrowserChooser.Mode.Directory) }
 
@@ -738,11 +752,11 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         try {
             val runner = collectRunner()
             val ssh = formParams()
-            val pyType = ConfigurationType.CONFIGURATION_TYPE_EP.extensionList
-                .firstOrNull { it.id == "PythonConfigurationType" }
-                ?: throw IllegalStateException("Python run configuration type not found")
-            val factory = pyType.configurationFactories.firstOrNull()
-                ?: throw IllegalStateException("Python run configuration factory not found")
+            val factory = findPythonConfigurationFactory()
+                ?: throw IllegalStateException(
+                    "Python run configuration factory not found.\n" +
+                        "Please ensure the Python plugin is enabled (PyCharm) or installed (IntelliJ IDEA).",
+                )
             val name = buildString {
                 append("IsaacLab")
                 val task = runner.task.trim()
@@ -777,10 +791,23 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             element.addContent(Element("option").setAttribute("name", "IS_MODULE_SDK").setAttribute("value", "true"))
             element.addContent(Element("option").setAttribute("name", "ADD_CONTENT_ROOTS").setAttribute("value", "true"))
             element.addContent(Element("option").setAttribute("name", "ADD_SOURCE_ROOTS").setAttribute("value", "true"))
+            // Match PyCharm's typical Python Run Configuration structure (see ref/.idea/workspace.xml).
+            element.addContent(Element("EXTENSION").setAttribute("ID", "PythonCoverageRunConfigurationExtension").setAttribute("runner", "coverage.py"))
+            element.addContent(Element("option").setAttribute("name", "RUN_TOOL").setAttribute("value", ""))
             element.addContent(Element("option").setAttribute("name", "SCRIPT_NAME").setAttribute("value", scriptValue))
             element.addContent(Element("option").setAttribute("name", "PARAMETERS").setAttribute("value", args))
+            element.addContent(Element("option").setAttribute("name", "SHOW_COMMAND_LINE").setAttribute("value", "false"))
+            element.addContent(Element("option").setAttribute("name", "EMULATE_TERMINAL").setAttribute("value", "false"))
+            element.addContent(Element("option").setAttribute("name", "MODULE_MODE").setAttribute("value", "false"))
+            element.addContent(Element("option").setAttribute("name", "REDIRECT_INPUT").setAttribute("value", "false"))
+            element.addContent(Element("option").setAttribute("name", "INPUT_FILE").setAttribute("value", ""))
 
             val envs = Element("envs")
+            // Default PyCharm env for better logs; let user override in Additional Env.
+            val extraEnvKeys = collectEnvFromTable().map { it.first.trim() }.filter { it.isNotEmpty() }.toSet()
+            if (!extraEnvKeys.any { it.equals("PYTHONUNBUFFERED", ignoreCase = true) }) {
+                envs.addContent(Element("env").setAttribute("name", "PYTHONUNBUFFERED").setAttribute("value", "1"))
+            }
             if (runner.gpuList.isNotEmpty()) {
                 envs.addContent(Element("env").setAttribute("name", "CUDA_VISIBLE_DEVICES").setAttribute("value", runner.gpuList.joinToString(",")))
             }
@@ -798,6 +825,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 envs.addContent(Element("env").setAttribute("name", kk).setAttribute("value", v))
             }
             if (envs.children.isNotEmpty()) element.addContent(envs)
+            element.addContent(Element("method").setAttribute("v", "2"))
 
             settings.configuration.readExternal(element)
             rm.addConfiguration(settings)
@@ -820,6 +848,55 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         } catch (e: Exception) {
             edt { Messages.showWarningDialog(this, e.message ?: e.javaClass.simpleName, "Save Run Configuration Failed") }
         }
+    }
+
+    private fun findPythonConfigurationFactory(): com.intellij.execution.configurations.ConfigurationFactory? {
+        // Preferred: call PythonConfigurationType.getInstance() if available (no compile-time dependency).
+        runCatching {
+            val cls = Class.forName("com.jetbrains.python.run.PythonConfigurationType")
+            val inst = cls.methods.firstOrNull { it.name == "getInstance" && it.parameterCount == 0 }?.invoke(null)
+            val type = inst as? ConfigurationType
+            val f = type?.configurationFactories?.firstOrNull()
+            if (f != null) {
+                appendDebug("[runconfig] python type via reflection: ${type.id} factories=${type.configurationFactories.size}\n")
+                return f
+            }
+        }.onFailure {
+            appendDebug("[runconfig] reflection PythonConfigurationType failed: ${it.javaClass.simpleName}: ${it.message}\n")
+        }
+
+        // Fallback: scan all configuration types and pick the best match.
+        val types = ConfigurationType.CONFIGURATION_TYPE_EP.extensionList
+        data class Candidate(val score: Int, val type: ConfigurationType, val factory: com.intellij.execution.configurations.ConfigurationFactory)
+        val candidates = ArrayList<Candidate>()
+        for (t in types) {
+            val factories = t.configurationFactories ?: emptyArray()
+            if (factories.isEmpty()) continue
+            val id = (runCatching { t.id }.getOrNull() ?: "").trim()
+            val display = (runCatching { t.displayName }.getOrNull() ?: "").trim()
+            val scoreBase = when {
+                id == "PythonConfigurationType" -> 100
+                display.contains("python", ignoreCase = true) -> 70
+                id.contains("python", ignoreCase = true) -> 60
+                else -> 0
+            }
+            if (scoreBase <= 0) continue
+            for (f in factories) {
+                val fn = (runCatching { f.name }.getOrNull() ?: "").trim()
+                val score = scoreBase + if (fn.contains("python", ignoreCase = true) || fn == "Python") 10 else 0
+                candidates += Candidate(score, t, f)
+            }
+        }
+        val best = candidates.maxByOrNull { it.score }
+        if (best != null) {
+            appendDebug("[runconfig] python type via scan: ${best.type.id} (${best.type.displayName}) factory='${best.factory.name}'\n")
+            return best.factory
+        }
+
+        // Diagnostic dump (short) to help users when running in an IDE without Python support.
+        val sample = types.take(12).joinToString { "${it.id}:${it.displayName}(${it.configurationFactories.size})" }
+        appendDebug("[runconfig] no python factories; sample types: $sample\n")
+        return null
     }
 
     private fun buildPythonParameters(runner: IsaacLabRunnerSpec, extraParamsText: String): String {
