@@ -15,6 +15,7 @@ class GpuUsageIcon(private val index: Int) : Icon {
     @Volatile var utilPercent: Int = 0
     @Volatile var memUsedMiB: Int = 0
     @Volatile var memTotalMiB: Int = 0
+    @Volatile var selected: Boolean = false
 
     private val w = 64
     private val h = 18
@@ -27,8 +28,8 @@ class GpuUsageIcon(private val index: Int) : Icon {
         try {
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
 
-            val bg = JBColor(0xF2F2F2, 0x3C3F41)
-            val border = JBColor(0xC9C9C9, 0x5A5D60)
+            val bg = if (selected) JBColor(0xE8F0FE, 0x2F3B52) else JBColor(0xF2F2F2, 0x3C3F41)
+            val border = if (selected) JBColor(0x3574F0, 0x6EA2FF) else JBColor(0xC9C9C9, 0x5A5D60)
             g2.color = bg
             g2.fillRoundRect(x, y, w, h, 6, 6)
             g2.color = border
@@ -72,9 +73,20 @@ class GpuUsageIcon(private val index: Int) : Icon {
             val ty = y + (h + fm.ascent - fm.descent) / 2
             g2.drawString(s, tx, ty)
             g2.font = oldFont
+
+            // Selection mark: small check in the top-right corner (makes selection obvious even in a dense grid).
+            if (selected) {
+                val cx = x + w - 10
+                val cy = y + 6
+                g2.color = JBColor(0x3574F0, 0x6EA2FF)
+                g2.fillOval(cx - 4, cy - 4, 8, 8)
+                g2.color = JBColor.WHITE
+                g2.stroke = java.awt.BasicStroke(1.6f, java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND)
+                g2.drawLine(cx - 2, cy, cx - 1, cy + 2)
+                g2.drawLine(cx - 1, cy + 2, cx + 3, cy - 2)
+            }
         } finally {
             g2.dispose()
         }
     }
 }
-

@@ -60,7 +60,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     companion object {
         // Used to verify which build is currently loaded in the IDE (shown in debug output).
-        private const val BUILD_MARKER = "2.4.3-sftp-port-fix-v1"
+        private const val BUILD_MARKER = "2.4.4-gpu-select-visibility-v1"
     }
 
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
@@ -580,12 +580,19 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 actionCommand = i.toString()
                 isSelected = prev.contains(i)
                 this.icon = icon
+                icon.selected = isSelected
                 toolTipText = "GPU $i"
                 horizontalAlignment = SwingConstants.LEFT
                 margin = Insets(0, 0, 0, 0)
                 isFocusable = false
+                isContentAreaFilled = false
+                isBorderPainted = false
             }
-            b.addChangeListener { updateRunnerPreview() }
+            b.addChangeListener {
+                icon.selected = b.isSelected
+                b.repaint()
+                updateRunnerPreview()
+            }
             buttons += b
             gpuBoxesPanel.add(b)
         }
