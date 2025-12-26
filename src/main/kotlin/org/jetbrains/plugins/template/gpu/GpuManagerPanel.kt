@@ -47,6 +47,7 @@ import javax.swing.table.DefaultTableModel
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.PathManager
 import com.intellij.ide.plugins.PluginManagerCore
 import com.intellij.openapi.module.ModuleManager
 import com.intellij.openapi.roots.ProjectRootManager
@@ -60,6 +61,8 @@ import javax.swing.event.ListSelectionListener
 import javax.swing.event.TableColumnModelEvent
 import javax.swing.event.TableColumnModelListener
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.swing.event.PopupMenuEvent
+import javax.swing.event.PopupMenuListener
 
 class GpuManagerPanel(private val project: com.intellij.openapi.project.Project) : JBPanel<GpuManagerPanel>(BorderLayout()) {
 
@@ -105,11 +108,19 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val settingsToggleBtn = JButton("Settings").apply { toolTipText = "Hide settings" }
 
     // Runner / command preview (ported from gpu_manager_gui)
+    private val presetCombo = JComboBox<String>().apply {
+        isEditable = true
+        toolTipText = "Runner preset name"
+        prototypeDisplayValue = "2025-12-26_my_long_preset_name"
+    }
+    private val presetSaveBtn = JButton("Save")
+    private val presetLoadBtn = JButton("Load")
+    private val presetDeleteBtn = JButton("Delete")
     private val entryScriptField = TextFieldWithBrowseButton(JBTextField(40)).apply {
         toolTipText = "Python entry script path for `./isaaclab.sh -p` (select a .py file)"
     }
     private val taskField = JBTextField(18)
-    private val numEnvsField = JBTextField(10).apply {
+    private val numEnvsField = JBTextField(26).apply {
         toolTipText = "Value for --num_envs (type a number, e.g. 8192)"
         text = "1"
     }
@@ -179,6 +190,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     @Volatile private var userResized: Boolean = false
     @Volatile private var pendingRunnerSelectedGpus: Set<Int> = emptySet()
     @Volatile private var loadingState: Boolean = false
+    @Volatile private var presetComboUpdating: Boolean = false
+    @Volatile private var presetSelectionArmed: Boolean = false
+    @Volatile private var autoCollapsedForCurrentSession: Boolean = false
     private data class SettingsRow(val label: JLabel, val row: JPanel)
     private lateinit var rowIdeSshConfig: SettingsRow
     private lateinit var rowManualUser: SettingsRow
@@ -332,21 +346,34 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         allowShrinkField(loadRunField.textField)
         allowShrinkField(checkpointField.textField)
 
-        // Row 0: Entry (-p) full width
+        // Row 0: Preset
+        val presetRow = JPanel(BorderLayout(6, 0)).apply {
+            val btns = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+                add(presetSaveBtn)
+                add(presetLoadBtn)
+                add(presetDeleteBtn)
+            }
+            add(presetCombo, BorderLayout.CENTER)
+            add(btns, BorderLayout.EAST)
+        }
+        runnerTop.add(JLabel("Preset"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(presetRow, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+
+        // Row 1: Entry (-p) full width
         entryScriptField.textField.columns = 40
-        runnerTop.add(JLabel("Entry (-p)"), gbc(0, 0).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(entryScriptField, gbc(1, 0).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("Entry (-p)"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(entryScriptField, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
-        // Row 1: task
+        // Row 2: task
         taskField.columns = 26
-        runnerTop.add(JLabel("--task"), gbc(0, 1).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(taskField, gbc(1, 1).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("--task"), gbc(0, 2).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(taskField, gbc(1, 2).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
-        // Row 2: num_envs (text input, no +/- buttons)
-        runnerTop.add(JLabel("--num_envs"), gbc(0, 2).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(numEnvsField, gbc(1, 2).apply { weightx = 0.0; fill = GridBagConstraints.HORIZONTAL; anchor = GridBagConstraints.LINE_START })
+        // Row 3: num_envs (full width)
+        runnerTop.add(JLabel("--num_envs"), gbc(0, 3).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(numEnvsField, gbc(1, 3).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
-        // Row 3: flags split into multiple lines; keep `--resume` last.
+        // Row 4: flags split into multiple lines; keep `--resume` last.
         val flagsRow = JPanel().apply {
             layout = BoxLayout(this, BoxLayout.Y_AXIS)
             alignmentX = Component.LEFT_ALIGNMENT
@@ -369,8 +396,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val flagsAndResume = JPanel(BorderLayout(16, 0)).apply { border = BorderFactory.createEmptyBorder() }
         flagsAndResume.add(flagsRow, BorderLayout.WEST)
         flagsAndResume.add(resumeSectionPanel, BorderLayout.CENTER)
-        runnerTop.add(JLabel("Flags"), gbc(0, 3).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(flagsAndResume, gbc(1, 3).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("Flags"), gbc(0, 4).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(flagsAndResume, gbc(1, 4).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         // Resume details stacked vertically; shown only when resume is enabled
         resumeDetailsPanel.removeAll()
@@ -392,8 +419,8 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val gpuRow = JPanel(BorderLayout(6, 0)).apply {
             add(gpuBoxesPanel, BorderLayout.CENTER)
         }
-        runnerTop.add(JLabel("GPUs"), gbc(0, 4).apply { anchor = GridBagConstraints.LINE_END })
-        runnerTop.add(gpuRow, gbc(1, 4).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+        runnerTop.add(JLabel("GPUs"), gbc(0, 5).apply { anchor = GridBagConstraints.LINE_END })
+        runnerTop.add(gpuRow, gbc(1, 5).apply { gridwidth = 3; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
 
         val paramsPanel = JPanel(BorderLayout(0, 4)).apply {
             add(makeAdditionalHeader("Additional Params", addParamBtn, delParamBtn), BorderLayout.NORTH)
@@ -585,6 +612,25 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         paramsModel.addTableModelListener { updatePreview() }
         envModel.addTableModelListener { updatePreview() }
 
+        // Presets (host-agnostic runner presets)
+        presetSaveBtn.addActionListener { savePresetFromUi() }
+        presetLoadBtn.addActionListener { loadPresetIntoUi(presetNameFromUi()) }
+        presetDeleteBtn.addActionListener { deletePreset(presetNameFromUi()) }
+        // Auto-load only when user selects from the dropdown (to avoid recursion during programmatic refresh).
+        try {
+            presetCombo.addPopupMenuListener(object : PopupMenuListener {
+                override fun popupMenuWillBecomeVisible(e: PopupMenuEvent?) { presetSelectionArmed = true }
+                override fun popupMenuWillBecomeInvisible(e: PopupMenuEvent?) {
+                    if (presetSelectionArmed && !presetComboUpdating && !loadingState) {
+                        val name = presetNameFromUi()
+                        if (name.isNotBlank()) loadPresetIntoUi(name)
+                    }
+                    presetSelectionArmed = false
+                }
+                override fun popupMenuCanceled(e: PopupMenuEvent?) { presetSelectionArmed = false }
+            })
+        } catch (_: Throwable) {}
+
         // Default resume detail fields disabled until resume is enabled
         experimentNameField.isEnabled = false
         loadRunField.isEnabled = false
@@ -597,6 +643,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         loadIdeSshConfigs()
         loadStateToUi()
         updateConnectionModeUi()
+        refreshPresetCombo()
 
         // Runner tab: show a helpful placeholder until GPUs are detected.
         ensureRunnerGpuBoxes(0)
@@ -801,8 +848,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun collectRunner(): IsaacLabRunnerSpec {
         val task = taskField.text.trim()
         val numEnvs = numEnvsField.text.trim().toIntOrNull() ?: 0
+        val entry = toProjectRelative(entryScriptField.text.trim())
         return IsaacLabRunnerSpec(
-            entryScript = entryScriptField.text.trim(),
+            entryScript = entry,
             task = task,
             numEnvs = numEnvs,
             headless = headlessCb.isSelected,
@@ -815,6 +863,19 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             extraEnv = collectEnvFromTable(),
             gpuList = getRunnerSelectedGpus(),
         )
+    }
+
+    private fun toProjectRelative(path0: String): String {
+        val path = path0.trim()
+        if (path.isEmpty()) return path
+        if (!path.startsWith("/")) return path
+        val base0 = project.basePath?.trim().orEmpty()
+        if (base0.isEmpty()) return path
+        val base = base0.trimEnd('/')
+        if (base.isEmpty()) return path
+        val prefix = "$base/"
+        if (!path.startsWith(prefix)) return path
+        return path.removePrefix(prefix)
     }
 
     private fun installResumeFileChoosers() {
@@ -863,7 +924,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                         return
                     }
                     saveLastRemoteBrowseDir(parentDir(picked))
-                    entryScriptField.text = picked
+                    entryScriptField.text = toProjectRelative(picked)
                 }
             }
             appendDebug("[browse] result: '$picked'\n")
@@ -924,6 +985,158 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             copyArgsBtn.isEnabled = false
             copyEnvBtn.isEnabled = false
         }
+    }
+
+    private fun presetNameFromUi(): String {
+        val ed = presetCombo.editor?.editorComponent
+        val text = (ed as? JTextField)?.text
+        val t = (text ?: presetCombo.editor?.item?.toString() ?: presetCombo.selectedItem?.toString() ?: "").trim()
+        return t
+    }
+
+    private fun refreshPresetCombo() {
+        presetComboUpdating = true
+        try {
+            val st = IsaacLabAssistantAppState.getInstance().state
+            val names = st.runnerPresets.mapNotNull { it.name.trim().ifEmpty { null } }.distinct().sorted()
+            val current = presetNameFromUi()
+            presetCombo.removeAllItems()
+            for (n in names) presetCombo.addItem(n)
+            val last = st.lastRunnerPreset.trim()
+            when {
+                current.isNotEmpty() -> presetCombo.editor.item = current
+                last.isNotEmpty() -> presetCombo.editor.item = last
+                else -> presetCombo.editor.item = ""
+            }
+            presetLoadBtn.isEnabled = presetNameFromUi().isNotEmpty()
+            presetDeleteBtn.isEnabled = presetNameFromUi().isNotEmpty()
+        } finally {
+            presetComboUpdating = false
+        }
+    }
+
+    private fun collectPresetFromUi(name: String): IsaacLabAssistantAppState.RunnerPreset {
+        val r = collectRunner()
+        return IsaacLabAssistantAppState.RunnerPreset(
+            name = name,
+            entryScript = entryScriptField.textField.text.orEmpty(),
+            task = r.task,
+            numEnvs = numEnvsField.text.orEmpty(),
+            headless = headlessCb.isSelected,
+            livestream = livestreamCb.isSelected,
+            resume = resumeCb.isSelected,
+            experimentName = experimentNameField.text.orEmpty(),
+            loadRun = loadRunField.textField.text.orEmpty(),
+            checkpoint = checkpointField.textField.text.orEmpty(),
+            selectedGpus = r.gpuList.toMutableList(),
+            additionalParams = collectParamsFromTable().map { IsaacLabAssistantAppState.Kv(it.first, it.second ?: "") }.toMutableList(),
+            additionalEnv = collectEnvFromTable().map { IsaacLabAssistantAppState.Kv(it.first, it.second) }.toMutableList(),
+        )
+    }
+
+    private fun savePresetFromUi() {
+        val name = presetNameFromUi()
+        if (name.isBlank()) {
+            Messages.showWarningDialog(this, "Please input a preset name.", "Preset")
+            return
+        }
+        val st = IsaacLabAssistantAppState.getInstance()
+        val s = st.state
+        val p = collectPresetFromUi(name)
+        val idx = s.runnerPresets.indexOfFirst { it.name.trim() == name }
+        if (idx >= 0) s.runnerPresets[idx] = p else s.runnerPresets.add(p)
+        s.lastRunnerPreset = name
+        saveUiToState()
+        refreshPresetCombo()
+        val hint = localPresetStorageHint()
+        setStatus("Saved preset '$name' ($hint)")
+        try {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("IsaacLabAssistant")
+                .createNotification("Saved preset '$name' ($hint)", NotificationType.INFORMATION)
+                .notify(project)
+        } catch (_: Throwable) {}
+        if (debugEnabled) appendDebug("[preset] saved '$name' (local app state)\n")
+        try { Messages.showInfoMessage(this, "Saved preset '$name' (${localPresetStorageHint()}).", "Preset") } catch (_: Throwable) {}
+    }
+
+    private fun loadPresetIntoUi(name0: String) {
+        val name = name0.trim()
+        if (name.isBlank()) return
+        val st = IsaacLabAssistantAppState.getInstance().state
+        val p = st.runnerPresets.firstOrNull { it.name.trim() == name } ?: run {
+            setStatus("Preset not found: '$name'")
+            return
+        }
+        loadingState = true
+        try {
+            presetCombo.editor.item = name
+            entryScriptField.text = p.entryScript
+            taskField.text = p.task
+            numEnvsField.text = p.numEnvs
+            headlessCb.isSelected = p.headless
+            livestreamCb.isSelected = p.livestream
+            resumeCb.isSelected = p.resume
+            experimentNameField.text = p.experimentName
+            loadRunField.text = p.loadRun
+            checkpointField.text = p.checkpoint
+            pendingRunnerSelectedGpus = p.selectedGpus.toSet()
+
+            paramsModel.rowCount = 0
+            for (kv in p.additionalParams) paramsModel.addRow(arrayOf(kv.key, kv.value))
+            envModel.rowCount = 0
+            for (kv in p.additionalEnv) envModel.addRow(arrayOf(kv.key, kv.value))
+
+            val on = resumeCb.isSelected
+            experimentNameField.isEnabled = on
+            loadRunField.isEnabled = on
+            loadRunField.textField.isEnabled = on
+            checkpointField.isEnabled = on
+            checkpointField.textField.isEnabled = on
+            resumeSectionPanel.isVisible = on
+        } finally {
+            loadingState = false
+        }
+        IsaacLabAssistantAppState.getInstance().state.lastRunnerPreset = name
+        ensureRunnerGpuBoxes(lastSnapshot?.gpus?.size ?: 0)
+        updateRunnerPreview()
+        saveUiToState()
+        refreshPresetCombo()
+        setStatus("Loaded preset '$name'")
+        try {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("IsaacLabAssistant")
+                .createNotification("Loaded preset '$name'", NotificationType.INFORMATION)
+                .notify(project)
+        } catch (_: Throwable) {}
+        try { Messages.showInfoMessage(this, "Loaded preset '$name'.", "Preset") } catch (_: Throwable) {}
+    }
+
+    private fun deletePreset(name0: String) {
+        val name = name0.trim()
+        if (name.isBlank()) return
+        val resp = Messages.showYesNoDialog(this, "Delete preset '$name'?", "Delete Preset", null)
+        if (resp != Messages.YES) return
+        val st = IsaacLabAssistantAppState.getInstance()
+        val s = st.state
+        s.runnerPresets.removeIf { it.name.trim() == name }
+        if (s.lastRunnerPreset.trim() == name) s.lastRunnerPreset = ""
+        saveUiToState()
+        refreshPresetCombo()
+        setStatus("Deleted preset '$name'")
+        try {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup("IsaacLabAssistant")
+                .createNotification("Deleted preset '$name'", NotificationType.INFORMATION)
+                .notify(project)
+        } catch (_: Throwable) {}
+        try { Messages.showInfoMessage(this, "Deleted preset '$name'.", "Preset") } catch (_: Throwable) {}
+    }
+
+    private fun localPresetStorageHint(): String {
+        // This service is APP-level and should be stored on the local machine running the IDE UI (Gateway Client).
+        val dir = runCatching { PathManager.getConfigPath() }.getOrNull().orEmpty()
+        return if (dir.isNotBlank()) "local: $dir/options/isaaclabAssistantApp.xml" else "stored locally"
     }
 
     private fun buildArgsStrings(runner: IsaacLabRunnerSpec): Pair<String, String> {
@@ -1361,6 +1574,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     private fun restartMonitor() {
         stopMonitor()
+        autoCollapsedForCurrentSession = false
         val p = formParamsOrNull()
         if (p == null) {
             setStatus("SSH not configured")
@@ -1399,6 +1613,18 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                     updateRunnerGpuUsage(show.gpus)
                     lastSnapshot = show
                     val now = java.time.LocalTime.now().withNano(0).toString()
+                    // Auto-collapse settings once we have a successful snapshot (connected).
+                    if (!autoCollapsedForCurrentSession && !settingsCollapsed) {
+                        val connected = show.gpus.isNotEmpty() && show.errors.isEmpty()
+                        if (connected) {
+                            autoCollapsedForCurrentSession = true
+                            settingsCollapsed = true
+                            settingsPanel.isVisible = false
+                            settingsToggleBtn.toolTipText = "Show settings"
+                            revalidate()
+                            repaint()
+                        }
+                    }
                     if (s.errors.isNotEmpty()) {
                         setStatus("Error @ $now: " + s.errors.joinToString("; "))
                     } else {
@@ -1798,6 +2024,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             loadRunField.text = rst.loadRun
             checkpointField.text = rst.checkpoint
             pendingRunnerSelectedGpus = rst.selectedGpus.toSet()
+            presetCombo.editor.item = IsaacLabAssistantAppState.getInstance().state.lastRunnerPreset
 
             paramsModel.rowCount = 0
             for (kv in rst.additionalParams) paramsModel.addRow(arrayOf(kv.key, kv.value))
