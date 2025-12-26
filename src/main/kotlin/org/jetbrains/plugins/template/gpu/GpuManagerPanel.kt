@@ -18,6 +18,9 @@ import java.awt.GridBagLayout
 import java.awt.Insets
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.nio.charset.StandardCharsets
 import javax.swing.BorderFactory
 import javax.swing.BoxLayout
 import javax.swing.Box
@@ -34,6 +37,7 @@ import javax.swing.JRadioButton
 import javax.swing.JToggleButton
 import javax.swing.SwingConstants
 import javax.swing.JTextField
+import javax.swing.JComponent
 import javax.swing.SpinnerNumberModel
 import javax.swing.SwingUtilities
 import javax.swing.JComboBox
@@ -55,20 +59,32 @@ import javax.swing.event.ListSelectionEvent
 import javax.swing.event.ListSelectionListener
 import javax.swing.event.TableColumnModelEvent
 import javax.swing.event.TableColumnModelListener
+import java.util.concurrent.atomic.AtomicBoolean
 
 class GpuManagerPanel(private val project: com.intellij.openapi.project.Project) : JBPanel<GpuManagerPanel>(BorderLayout()) {
 
     companion object {
         // Used to verify which build is currently loaded in the IDE (shown in debug output).
-        private const val BUILD_MARKER = "2.4.7-run-config-python-factory-v1"
+        private const val BUILD_MARKER = "2.5.4-no-ide-target-v1"
     }
 
     @Volatile private var gatewayTarget: DetectedGatewayTarget? = null
+    private enum class ConnectionMode { IDE_SSH, MANUAL_SSH }
+    private val connectionModeCombo = JComboBox(arrayOf("IDE SSH", "Manual SSH"))
+    private val applyConnectionBtn = JButton("Apply").apply {
+        toolTipText = "Apply connection settings and restart GPU monitor"
+    }
     private val sshConfigCombo = JComboBox<String>()
     @Volatile private var sshConfigTargets: List<DetectedGatewayTarget> = emptyList()
     private val sshPasswordField = JPasswordField(18)
+    private val manualSshUserField = JBTextField(12)
+    private val manualSshHostField = JBTextField(18)
+    private val manualSshPortField = JBTextField(6)
     private val sshPasswordApplyTimer = Timer(450) {
         applySshPasswordToStoreAndRestart()
+    }.apply { isRepeats = false }
+    private val manualTargetApplyTimer = Timer(450) {
+        applyManualTargetAndRestart()
     }.apply { isRepeats = false }
 
     private val intervalSpin = JSpinner(SpinnerNumberModel(5.0, 1.0, 120.0, 1.0))
@@ -139,6 +155,16 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private val previewArea = javax.swing.JTextArea(5, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
     private val copyPreviewBtn = JButton("Copy")
     private val saveRunConfigBtn = JButton("Save as Python Run Config")
+    private val runConfigUnavailableHint = JBLabel("Python Run Config not available in this IDE instance.").apply {
+        foreground = JBColor.GRAY
+        isVisible = false
+    }
+    @Volatile private var pythonRunConfigAvailable: Boolean = false
+
+    private val argsArea = javax.swing.JTextArea(3, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
+    private val envArea = javax.swing.JTextArea(3, 80).apply { isEditable = false; lineWrap = true; wrapStyleWord = true }
+    private val copyArgsBtn = JButton("Copy Args").apply { toolTipText = "Copy one-line Parameters for PyCharm Run/Debug config" }
+    private val copyEnvBtn = JButton("Copy Env").apply { toolTipText = "Copy one-line Environment variables for PyCharm Run/Debug config" }
 
     private val gpuTableModel = object : DefaultTableModel(arrayOf("GPU", "Name", "Util", "Memory"), 0) {
         override fun isCellEditable(row: Int, column: Int) = false
@@ -151,6 +177,25 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     @Volatile private var currentParams: SshParams? = null
     @Volatile private var lastSnapshot: Snapshot? = null
     @Volatile private var userResized: Boolean = false
+    @Volatile private var pendingRunnerSelectedGpus: Set<Int> = emptySet()
+    @Volatile private var loadingState: Boolean = false
+    private data class SettingsRow(val label: JLabel, val row: JPanel)
+    private lateinit var rowIdeSshConfig: SettingsRow
+    private lateinit var rowManualUser: SettingsRow
+    private lateinit var rowManualHost: SettingsRow
+    private lateinit var rowManualPort: SettingsRow
+    private lateinit var rowPassword: SettingsRow
+
+    // Reverse tunnel (ssh -R) UI/state
+    private val reverseBindPortSpin = JSpinner(SpinnerNumberModel(7897, 1, 65535, 1))
+    private val reverseLocalPortSpin = JSpinner(SpinnerNumberModel(7897, 1, 65535, 1))
+    private val reverseStartBtn = JButton("Start")
+    private val reverseStopBtn = JButton("Stop").apply { isEnabled = false }
+    private val reverseStatusLabel = JBLabel("Not running").apply { foreground = JBColor.GRAY }
+    private val reverseStopFlag = AtomicBoolean(false)
+    @Volatile private var reverseThread: Thread? = null
+    @Volatile private var reverseSession: com.jcraft.jsch.Session? = null
+    @Volatile private var reverseProc: Process? = null
 
     init {
         // Consistent left alignment for all input fields (including spinner editors)
@@ -162,6 +207,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         try { checkpointField.textField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { (intervalSpin.editor as? JSpinner.DefaultEditor)?.textField?.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
         try { sshPasswordField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { manualSshUserField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { manualSshHostField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
+        try { manualSshPortField.horizontalAlignment = JTextField.LEFT } catch (_: Throwable) {}
 
         // Top connection/settings panel (collapsible)
         settingsPanel.border = BorderFactory.createCompoundBorder(
@@ -172,7 +220,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             ),
         )
         var gx = 0; var gy = 0
-        fun add(lbl: String, comp: java.awt.Component) {
+        fun addRow(lbl: String, comp: java.awt.Component): SettingsRow {
             val label = JLabel(lbl)
             settingsPanel.add(label, GridBagConstraints().apply {
                 gridx = gx; gridy = gy; insets = Insets(2, 4, 2, 4); anchor = GridBagConstraints.LINE_END
@@ -183,14 +231,23 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 gridx = gx + 1; gridy = gy; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL; insets = Insets(2, 4, 2, 12)
             })
             gy += 1
+            return SettingsRow(label, row)
         }
 
-        add("Interval (s)", intervalSpin)
-        add("OS", osLabel)
+        addRow("Interval (s)", intervalSpin)
+        addRow("OS", osLabel)
 
         // Use IDE-managed SSH configs (no manual host/port input).
-        add("SSH Config", sshConfigCombo)
-        add("SSH Password", sshPasswordField)
+        val connectionRow = JPanel(BorderLayout(6, 0)).apply {
+            add(connectionModeCombo, BorderLayout.CENTER)
+            add(applyConnectionBtn, BorderLayout.EAST)
+        }
+        addRow("Connection", connectionRow)
+        rowIdeSshConfig = addRow("IDE SSH Config", sshConfigCombo)
+        rowManualUser = addRow("Manual User", manualSshUserField)
+        rowManualHost = addRow("Manual Host", manualSshHostField)
+        rowManualPort = addRow("Manual Port", manualSshPortField)
+        rowPassword = addRow("SSH Password", sshPasswordField)
 
         val header = JPanel(BorderLayout()).apply {
             border = BorderFactory.createEmptyBorder(6, 8, 2, 8)
@@ -355,10 +412,30 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             val top = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
                 add(JLabel("Preview"))
                 add(copyPreviewBtn)
+                add(copyArgsBtn)
+                add(copyEnvBtn)
                 add(saveRunConfigBtn)
+                add(runConfigUnavailableHint)
             }
             add(top, BorderLayout.NORTH)
-            add(JBScrollPane(previewArea), BorderLayout.CENTER)
+            val previewScroll = JBScrollPane(previewArea)
+            val argsPanel = JPanel(BorderLayout(0, 2)).apply {
+                add(JBLabel("Parameters (display)").apply { foreground = JBColor.GRAY }, BorderLayout.NORTH)
+                add(JBScrollPane(argsArea).apply { horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER }, BorderLayout.CENTER)
+            }
+            val envPanel = JPanel(BorderLayout(0, 2)).apply {
+                add(JBLabel("Environment variables (display)").apply { foreground = JBColor.GRAY }, BorderLayout.NORTH)
+                add(JBScrollPane(envArea).apply { horizontalScrollBarPolicy = ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER }, BorderLayout.CENTER)
+            }
+            val mid = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, argsPanel, envPanel).apply {
+                resizeWeight = 0.6
+                isOneTouchExpandable = true
+            }
+            val bottom = JSplitPane(JSplitPane.VERTICAL_SPLIT, previewScroll, mid).apply {
+                resizeWeight = 0.7
+                isOneTouchExpandable = true
+            }
+            add(bottom, BorderLayout.CENTER)
         }
 
         fun updateAdditionalTablesHeights() {
@@ -413,6 +490,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         val tabs = JBTabbedPane().apply {
             addTab("Monitor", gpuScroll)
             addTab("Runner", runnerScroll)
+            addTab("Proxy", makeProxyPanel())
         }
         add(tabs, BorderLayout.CENTER)
 
@@ -445,22 +523,44 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             loadSavedPasswordForSelectedTarget()
             restartMonitor()
         }
+        connectionModeCombo.addActionListener {
+            updateConnectionModeUi()
+            applySelectedSshTargetToHeader()
+            loadSavedPasswordForSelectedTarget()
+            saveUiToState()
+            restartMonitor()
+        }
+        applyConnectionBtn.addActionListener {
+            updateConnectionModeUi()
+            applySelectedSshTargetToHeader()
+            loadSavedPasswordForSelectedTarget()
+            saveUiToState()
+            restartMonitor()
+        }
+        reverseStartBtn.addActionListener { startReverseTunnel() }
+        reverseStopBtn.addActionListener { stopReverseTunnel() }
 
         fun docListener(block: () -> Unit): DocumentListener = object : DocumentListener {
             override fun insertUpdate(e: DocumentEvent?) = block()
             override fun removeUpdate(e: DocumentEvent?) = block()
             override fun changedUpdate(e: DocumentEvent?) = block()
         }
-        val updatePreview = { updateRunnerPreview() }
+        val updatePreview = {
+            updateRunnerPreview()
+            saveUiToState()
+        }
         sshPasswordField.document.addDocumentListener(docListener { sshPasswordApplyTimer.restart() })
+        manualSshUserField.document.addDocumentListener(docListener { manualTargetApplyTimer.restart() })
+        manualSshHostField.document.addDocumentListener(docListener { manualTargetApplyTimer.restart() })
+        manualSshPortField.document.addDocumentListener(docListener { manualTargetApplyTimer.restart() })
         entryScriptField.textField.document.addDocumentListener(docListener(updatePreview))
         taskField.document.addDocumentListener(docListener(updatePreview))
         numEnvsField.document.addDocumentListener(docListener(updatePreview))
         experimentNameField.document.addDocumentListener(docListener(updatePreview))
         loadRunField.textField.document.addDocumentListener(docListener(updatePreview))
         checkpointField.textField.document.addDocumentListener(docListener(updatePreview))
-        headlessCb.addChangeListener { updateRunnerPreview() }
-        livestreamCb.addChangeListener { updateRunnerPreview() }
+        headlessCb.addChangeListener { updatePreview() }
+        livestreamCb.addChangeListener { updatePreview() }
         resumeCb.addChangeListener {
             val on = resumeCb.isSelected
             experimentNameField.isEnabled = on
@@ -469,19 +569,21 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             checkpointField.isEnabled = on
             checkpointField.textField.isEnabled = on
             resumeSectionPanel.isVisible = on
-            updateRunnerPreview()
+            updatePreview()
             runnerPanel.revalidate()
             runnerPanel.repaint()
         }
         copyPreviewBtn.addActionListener { copyPreviewToClipboard() }
         saveRunConfigBtn.addActionListener { saveAsRunConfiguration() }
+        copyArgsBtn.addActionListener { copyArgsToClipboard() }
+        copyEnvBtn.addActionListener { copyEnvToClipboard() }
         addParamBtn.addActionListener { addTableRow(paramsTable, paramsModel) }
         delParamBtn.addActionListener { deleteSelectedRows(paramsTable, paramsModel) }
         addEnvBtn.addActionListener { addTableRow(envTable, envModel) }
         delEnvBtn.addActionListener { deleteSelectedRows(envTable, envModel) }
 
-        paramsModel.addTableModelListener { updateRunnerPreview() }
-        envModel.addTableModelListener { updateRunnerPreview() }
+        paramsModel.addTableModelListener { updatePreview() }
+        envModel.addTableModelListener { updatePreview() }
 
         // Default resume detail fields disabled until resume is enabled
         experimentNameField.isEnabled = false
@@ -492,7 +594,9 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         resumeSectionPanel.isVisible = false
 
         // Load persisted state
+        loadIdeSshConfigs()
         loadStateToUi()
+        updateConnectionModeUi()
 
         // Runner tab: show a helpful placeholder until GPUs are detected.
         ensureRunnerGpuBoxes(0)
@@ -507,7 +611,6 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         } catch (t: Throwable) {
             appendDebug("plugin: version detect failed: ${t.javaClass.simpleName}: ${t.message}\n")
         }
-        loadIdeSshConfigs()
         applySelectedSshTargetToHeader()
         loadSavedPasswordForSelectedTarget()
         setStatus("UI ready")
@@ -518,9 +621,75 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 .notify(null)
         } catch (_: Exception) {}
 
+        pythonRunConfigAvailable = detectPythonRunConfigAvailability()
+        saveRunConfigBtn.isVisible = true
+        saveRunConfigBtn.isEnabled = true
+        runConfigUnavailableHint.isVisible = false
+
         updateRunnerPreview()
         installResumeFileChoosers()
         restartMonitor()
+    }
+
+    private fun currentConnectionMode(): ConnectionMode {
+        return when ((connectionModeCombo.selectedItem as? String).orEmpty()) {
+            "Manual SSH" -> ConnectionMode.MANUAL_SSH
+            else -> ConnectionMode.IDE_SSH
+        }
+    }
+
+    private fun updateConnectionModeUi() {
+        val mode = currentConnectionMode()
+        val showIde = mode == ConnectionMode.IDE_SSH
+        val showManual = mode == ConnectionMode.MANUAL_SSH
+        rowIdeSshConfig.label.isVisible = showIde
+        rowIdeSshConfig.row.isVisible = showIde
+        rowManualUser.label.isVisible = showManual
+        rowManualUser.row.isVisible = showManual
+        rowManualHost.label.isVisible = showManual
+        rowManualHost.row.isVisible = showManual
+        rowManualPort.label.isVisible = showManual
+        rowManualPort.row.isVisible = showManual
+        rowPassword.label.isVisible = true
+        rowPassword.row.isVisible = true
+        settingsPanel.revalidate()
+        settingsPanel.repaint()
+    }
+
+    private fun makeProxyPanel(): JComponent {
+        val root = JPanel(BorderLayout(0, 8)).apply {
+            border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
+        }
+
+        val form = JPanel(GridBagLayout())
+        fun gbc(x: Int, y: Int): GridBagConstraints = GridBagConstraints().apply {
+            gridx = x
+            gridy = y
+            insets = Insets(2, 4, 2, 4)
+            anchor = GridBagConstraints.LINE_START
+        }
+        form.add(JLabel("Reverse Tunnel (ssh -R)"), gbc(0, 0).apply { gridwidth = 4; anchor = GridBagConstraints.LINE_START })
+        form.add(JBLabel("Remote server binds a port and forwards to your local localhost port.").apply { foreground = JBColor.GRAY },
+            gbc(0, 1).apply { gridwidth = 4 })
+
+        form.add(JLabel("Remote bind port"), gbc(0, 2).apply { anchor = GridBagConstraints.LINE_END })
+        form.add(reverseBindPortSpin, gbc(1, 2))
+        form.add(JLabel("Local port"), gbc(2, 2).apply { anchor = GridBagConstraints.LINE_END })
+        form.add(reverseLocalPortSpin, gbc(3, 2))
+
+        val btnRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+            add(reverseStartBtn)
+            add(reverseStopBtn)
+            add(reverseStatusLabel)
+        }
+        form.add(btnRow, gbc(0, 3).apply { gridwidth = 4; weightx = 1.0; fill = GridBagConstraints.HORIZONTAL })
+
+        reverseBindPortSpin.addChangeListener { saveUiToState() }
+        reverseLocalPortSpin.addChangeListener { saveUiToState() }
+
+        root.add(form, BorderLayout.NORTH)
+        root.add(JBLabel("Tip: this requires SSH mode (IDE SSH / Manual SSH).").apply { foreground = JBColor.GRAY }, BorderLayout.SOUTH)
+        return root
     }
 
     private fun makeAdditionalHeader(title: String, addBtn: JButton, delBtn: JButton): JPanel {
@@ -558,7 +727,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     private fun ensureRunnerGpuBoxes(n: Int) {
         val count = n.coerceAtLeast(0)
-        val prev = getRunnerSelectedGpus().toSet()
+        val prev = (getRunnerSelectedGpus().toSet() + pendingRunnerSelectedGpus).toSet()
         if (count == 0) {
             val msg = if (poller == null) "Waiting for GPU data…" else "No GPUs detected"
             val already =
@@ -596,11 +765,13 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
                 icon.selected = b.isSelected
                 b.repaint()
                 updateRunnerPreview()
+                saveUiToState()
             }
             buttons += b
             gpuBoxesPanel.add(b)
         }
         runnerGpuButtons = buttons
+        pendingRunnerSelectedGpus = emptySet()
         gpuBoxesPanel.revalidate()
         gpuBoxesPanel.repaint()
     }
@@ -653,9 +824,15 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
         fun chooseAndApply(kind: String, mode: SftpBrowserChooser.Mode) {
             appendDebug("[browse] click: $kind\n")
+            val base = formParamsOrNull()
+            if (base == null) {
+                Messages.showWarningDialog(this, "Configure an SSH connection first.", "SSH Not Configured")
+                appendDebug("[browse] result: <none> (no ssh target)\n")
+                return
+            }
             val picked = SftpBrowserChooser.choose(
                 project = project,
-                params = formParams().copy(timeoutSec = 20),
+                params = base.copy(timeoutSec = 20),
                 initialPath = initialRemoteBrowseDir(),
                 mode = mode,
                 onDebug = { appendDebug("[browse] $it\n") },
@@ -708,7 +885,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun initialRemoteBrowseDir(): String {
         val saved = GpuManagerState.getInstance().state.lastRemoteBrowseDir?.trim().orEmpty()
         if (saved.isNotEmpty()) return saved
-        val u = gatewayTarget?.user?.trim().orEmpty()
+        val u = effectiveSshUser().trim()
         if (u.isNotEmpty()) return "/home/$u"
         return "/home"
     }
@@ -730,13 +907,69 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             val r = collectRunner()
             val cmds = IsaacLabRunner.buildPreviewCommands(r)
             previewArea.text = cmds.joinToString("\n")
+            val (argsOneLine, argsDisplay) = buildArgsStrings(r)
+            val (envOneLine, envDisplay) = buildEnvStrings(r)
+            argsArea.text = argsDisplay
+            envArea.text = envDisplay
             copyPreviewBtn.isEnabled = true
             saveRunConfigBtn.isEnabled = true
+            copyArgsBtn.isEnabled = argsOneLine.isNotEmpty()
+            copyEnvBtn.isEnabled = envOneLine.isNotEmpty()
         } catch (e: Exception) {
             previewArea.text = "preview error: ${e.message ?: e.javaClass.simpleName}"
+            argsArea.text = ""
+            envArea.text = ""
             copyPreviewBtn.isEnabled = false
             saveRunConfigBtn.isEnabled = false
+            copyArgsBtn.isEnabled = false
+            copyEnvBtn.isEnabled = false
         }
+    }
+
+    private fun buildArgsStrings(runner: IsaacLabRunnerSpec): Pair<String, String> {
+        val oneLine = buildPythonParameters(runner, paramsToText()).trim()
+        val display = oneLine.replace(" --", "\n--").trim()
+        return Pair(oneLine, display)
+    }
+
+    private fun buildEnvStrings(runner: IsaacLabRunnerSpec): Pair<String, String> {
+        val env = linkedMapOf<String, String>()
+        // Predefined
+        if (runner.gpuList.isNotEmpty()) env["CUDA_VISIBLE_DEVICES"] = runner.gpuList.joinToString(",")
+        if (runner.livestream) env["LIVESTREAM"] = "2"
+        // Additional env table (UI wins)
+        for ((k, v) in collectEnvFromTable()) {
+            val kk = k.trim()
+            if (kk.isEmpty()) continue
+            env[kk] = v.trim()
+        }
+        val oneLine = env.entries
+            .filter { it.key.isNotEmpty() }
+            .joinToString(";") { "${it.key}=${it.value}" }
+        val display = env.entries
+            .filter { it.key.isNotEmpty() }
+            .joinToString("\n") { "${it.key}=${it.value}" }
+        return Pair(oneLine, display)
+    }
+
+    private fun copyArgsToClipboard() {
+        val r = collectRunner()
+        val (argsOneLine, _) = buildArgsStrings(r)
+        if (argsOneLine.isBlank()) return
+        try {
+            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(argsOneLine), null)
+            setStatus("Copied Parameters")
+        } catch (_: Exception) {}
+    }
+
+    private fun copyEnvToClipboard() {
+        val r = collectRunner()
+        val (envOneLine, _) = buildEnvStrings(r)
+        if (envOneLine.isBlank()) return
+        try {
+            Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(envOneLine), null)
+            setStatus("Copied Environment variables")
+        } catch (_: Exception) {}
     }
 
     private fun copyPreviewToClipboard() {
@@ -751,19 +984,23 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     private fun saveAsRunConfiguration() {
         try {
             val runner = collectRunner()
-            val ssh = formParams()
             val factory = findPythonConfigurationFactory()
-                ?: throw IllegalStateException(
-                    "Python run configuration factory not found.\n" +
-                        "Please ensure the Python plugin is enabled (PyCharm) or installed (IntelliJ IDEA).",
-                )
             val name = buildString {
                 append("IsaacLab")
                 val task = runner.task.trim()
                 if (task.isNotEmpty()) append(": ").append(task)
             }
+            val effFactory = factory ?: findPythonFactoryViaRunManagerImpl()
+            if (effFactory == null) {
+                runConfigUnavailableHint.isVisible = true
+                throw IllegalStateException(
+                    "Python run configuration factory not found in this IDE instance.\n" +
+                        "In JetBrains Gateway/Client, this usually means this plugin is running in the frontend (JetBrains Client) where Python run factories are not available.\n" +
+                        "Fix: install/enable this plugin in the Remote IDE Backend (Gateway -> Manage IDE Plugins for the remote).",
+                )
+            }
             val rm = RunManager.getInstance(project)
-            val settings = rm.createConfiguration(name, factory)
+            val settings = rm.createConfiguration(name, effFactory)
 
             // Build a native PyCharm Python run configuration via its XML format.
             // Note: This is local/IDE-managed (interpreter, docker/conda, env vars, debug, etc).
@@ -832,22 +1069,81 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
             rm.selectedConfiguration = settings
             setStatus("Saved Run Configuration: $name")
 
-            // Hint: PyCharm needs a Python interpreter (local or SSH) to show full Python Run Config UI and to debug.
-            val sdk = ProjectRootManager.getInstance(project).projectSdk
-            val isPythonSdk = sdk?.sdkType?.name?.contains("Python", ignoreCase = true) == true
-            if (!isPythonSdk) {
-                edt {
-                    Messages.showWarningDialog(
-                        this,
-                        "Saved a Python Run Configuration, but this project has no Python interpreter configured.\n" +
-                            "Configure one in Settings | Python Interpreter (local or SSH interpreter) to get the full Run/Debug panel and debugging support.",
-                        "Python Interpreter Not Configured",
-                    )
+            // In Gateway/Client, Python SDK types may not be present in the frontend classpath even if the backend
+            // has an interpreter configured. Only show this warning when Python SDK infrastructure is available.
+            val canCheckPythonSdk = runCatching { Class.forName("com.jetbrains.python.sdk.PythonSdkType") }.isSuccess
+            if (canCheckPythonSdk) {
+                val sdk = ProjectRootManager.getInstance(project).projectSdk
+                val isPythonSdk = sdk?.sdkType?.name?.contains("Python", ignoreCase = true) == true
+                if (!isPythonSdk) {
+                    edt {
+                        Messages.showWarningDialog(
+                            this,
+                            "Saved a Python Run Configuration, but this project has no Python interpreter configured.\n" +
+                                "Configure one in Settings | Python Interpreter to get the full Run/Debug panel and debugging support.",
+                            "Python Interpreter Not Configured",
+                        )
+                    }
                 }
+            } else {
+                appendDebug("[runconfig] skip interpreter check (Python SDK classes not available in this IDE instance)\n")
             }
         } catch (e: Exception) {
             edt { Messages.showWarningDialog(this, e.message ?: e.javaClass.simpleName, "Save Run Configuration Failed") }
         }
+    }
+
+    private fun findPythonFactoryViaRunManagerImpl(): com.intellij.execution.configurations.ConfigurationFactory? {
+        // Official-ish approach for Gateway/Client:
+        // RunManagerImpl can resolve factories by typeId/factoryName even when the frontend doesn't have the type in EP list.
+        return runCatching {
+            val rmImplCls = Class.forName("com.intellij.execution.impl.RunManagerImpl")
+            val getInstanceImpl = rmImplCls.methods.firstOrNull { it.name == "getInstanceImpl" && it.parameterCount == 1 }
+                ?: return@runCatching null
+            val rmImpl = getInstanceImpl.invoke(null, project) ?: return@runCatching null
+
+            val getFactory = rmImplCls.methods.firstOrNull { it.name == "getFactory" && it.parameterCount == 3 }
+                ?: return@runCatching null
+            // First try without allowing UnknownConfigurationType.
+            val factory = getFactory.invoke(rmImpl, "PythonConfigurationType", "Python", false)
+            val f = factory as? com.intellij.execution.configurations.ConfigurationFactory
+            if (f != null) {
+                appendDebug("[runconfig] RunManagerImpl.getFactory ok: '${f.name}' (${f.javaClass.name})\n")
+                return@runCatching f
+            }
+
+            // Diagnostic: if allowUnknown=true returns UnknownConfigurationType, it's not usable.
+            val factory2 = getFactory.invoke(rmImpl, "PythonConfigurationType", "Python", true)
+            val f2 = factory2 as? com.intellij.execution.configurations.ConfigurationFactory
+            if (f2 != null) {
+                appendDebug("[runconfig] RunManagerImpl.getFactory (allowUnknown) -> '${f2.name}' (${f2.javaClass.name})\n")
+            } else {
+                appendDebug("[runconfig] RunManagerImpl.getFactory returned null\n")
+            }
+            null
+        }.onFailure {
+            appendDebug("[runconfig] RunManagerImpl.getFactory failed: ${it.javaClass.simpleName}: ${it.message}\n")
+        }.getOrNull()
+    }
+
+    private fun detectPythonRunConfigAvailability(): Boolean {
+        // No debug spam: this is used to toggle UI visibility/state.
+        runCatching {
+            val cls = Class.forName("com.jetbrains.python.run.PythonConfigurationType")
+            val inst = cls.methods.firstOrNull { it.name == "getInstance" && it.parameterCount == 0 }?.invoke(null)
+            val type = inst as? ConfigurationType
+            return type?.configurationFactories?.isNotEmpty() == true
+        }
+        for (t in ConfigurationType.CONFIGURATION_TYPE_EP.extensionList) {
+            val factories = t.configurationFactories ?: emptyArray()
+            if (factories.isEmpty()) continue
+            val id = (runCatching { t.id }.getOrNull() ?: "")
+            val display = (runCatching { t.displayName }.getOrNull() ?: "")
+            if (id == "PythonConfigurationType") return true
+            if (id.contains("python", ignoreCase = true)) return true
+            if (display.contains("python", ignoreCase = true)) return true
+        }
+        return false
     }
 
     private fun findPythonConfigurationFactory(): com.intellij.execution.configurations.ConfigurationFactory? {
@@ -1065,16 +1361,19 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     private fun restartMonitor() {
         stopMonitor()
-        val p = formParams()
+        val p = formParamsOrNull()
+        if (p == null) {
+            setStatus("SSH not configured")
+            return
+        }
         currentParams = p
-        val local = p.isLocal()
-        setStatus(if (local) "Monitoring IDE target …" else "Monitoring ${buildDest(p)}:${p.port} …")
+        setStatus("Monitoring ${buildDest(p)}:${p.port} …")
 
         // Persist settings
         saveUiToState()
         // OS label async
         Thread {
-        val cmd = if (local) "uname -a || echo unknown" else "(cat /etc/os-release 2>/dev/null | sed -n '1,3p') || uname -a || echo unknown"
+            val cmd = "(cat /etc/os-release 2>/dev/null | sed -n '1,3p') || uname -a || echo unknown"
             val (rc, out, err) = SshExec(p, project).run(cmd)
             val text = if (rc == 0) out.trim().lines().firstOrNull() ?: "" else (err.ifBlank { out })
             edt { osLabel.text = "OS: ${text}" }
@@ -1122,13 +1421,7 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         poller = poll
         revalidate(); repaint()
 
-        val connText = if (local) EelBash.describeTarget(project) else "${buildDest(p)}:${p.port}"
-        if (local) {
-            connSummaryLabel.text = "Target: " + shortenMiddle(connText, 44)
-            connSummaryLabel.toolTipText = connText
-        } else {
-            applySelectedSshTargetToHeader()
-        }
+        applySelectedSshTargetToHeader()
     }
 
     private fun stopMonitor() {
@@ -1142,30 +1435,59 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
         // Keep target summary as-is.
     }
 
-    private fun formParams(): SshParams {
-        // Prefer Gateway-detected SSH target when available (supports non-22 ports like 50031).
-        val gt = gatewayTarget
-        if (gt != null) {
-            val pw = String(sshPasswordField.password).trim().ifEmpty { null }
-            return SshParams(
-                host = gt.host,
-                port = gt.port,
-                username = gt.user,
-                identityFile = null,
-                password = pw,
-                timeoutSec = 30,
-            )
+    private fun effectiveSshUser(): String {
+        return when (currentConnectionMode()) {
+            ConnectionMode.MANUAL_SSH -> manualSshUserField.text.trim()
+            ConnectionMode.IDE_SSH -> (gatewayTarget?.user ?: "").trim()
         }
-        return SshParams(
-            // Always execute on the IDE "project target" via EEL (Gateway => remote backend, local IDE => local machine).
-            host = "",
-            port = 22,
-            username = null,
-            identityFile = null,
-            password = null,
-            // EEL can be slower on first use, especially right after opening the project.
-            timeoutSec = 30,
-        )
+    }
+
+    private fun effectiveSshKeyOrNull(): Triple<String, Int, String?>? {
+        return when (currentConnectionMode()) {
+            ConnectionMode.IDE_SSH -> {
+                val gt = gatewayTarget ?: return null
+                Triple(gt.host, gt.port, gt.user)
+            }
+            ConnectionMode.MANUAL_SSH -> {
+                val host = manualSshHostField.text.trim()
+                val user = manualSshUserField.text.trim().ifEmpty { null }
+                val port = manualSshPortField.text.trim().toIntOrNull() ?: 22
+                if (host.isBlank()) return null
+                Triple(host, port, user)
+            }
+        }
+    }
+
+    private fun formParamsOrNull(): SshParams? {
+        val mode = currentConnectionMode()
+        val pw = String(sshPasswordField.password).trim().ifEmpty { null }
+        return when (mode) {
+            ConnectionMode.IDE_SSH -> {
+                val gt = gatewayTarget ?: return null
+                SshParams(
+                    host = gt.host,
+                    port = gt.port,
+                    username = gt.user,
+                    identityFile = null,
+                    password = pw,
+                    timeoutSec = 30,
+                )
+            }
+            ConnectionMode.MANUAL_SSH -> {
+                val host = manualSshHostField.text.trim()
+                val port = manualSshPortField.text.trim().toIntOrNull() ?: 22
+                val user = manualSshUserField.text.trim()
+                if (host.isBlank() || user.isBlank()) return null
+                SshParams(
+                    host = host,
+                    port = port,
+                    username = user,
+                    identityFile = null,
+                    password = pw,
+                    timeoutSec = 30,
+                )
+            }
+        }
     }
     private fun buildDest(p: SshParams): String {
         val user = (p.username ?: "").trim()
@@ -1197,29 +1519,44 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun applySelectedSshTargetToHeader() {
-        val idx = sshConfigCombo.selectedIndex
-        val targets = sshConfigTargets
-        val t = if (idx in targets.indices) targets[idx] else null
-        gatewayTarget = t
-        if (t != null) {
+        val mode = currentConnectionMode()
+        if (mode == ConnectionMode.IDE_SSH) {
+            val idx = sshConfigCombo.selectedIndex
+            val targets = sshConfigTargets
+            val t = if (idx in targets.indices) targets[idx] else null
+            gatewayTarget = t
+            if (t != null) {
+                val dest = buildString {
+                    val u = (t.user ?: "").trim()
+                    if (u.isNotEmpty()) append(u).append("@")
+                    append(t.host).append(":").append(t.port)
+                }
+                connSummaryLabel.text = "SSH: " + shortenMiddle(dest, 52)
+                connSummaryLabel.toolTipText = "${t.source}: $dest"
+            } else {
+                connSummaryLabel.text = "SSH: <not selected>"
+                connSummaryLabel.toolTipText = "No IDE SSH config selected"
+            }
+            return
+        }
+        if (mode == ConnectionMode.MANUAL_SSH) {
+            val user = manualSshUserField.text.trim()
+            val host = manualSshHostField.text.trim()
+            val port = manualSshPortField.text.trim().toIntOrNull() ?: 22
             val dest = buildString {
-                val u = (t.user ?: "").trim()
-                if (u.isNotEmpty()) append(u).append("@")
-                append(t.host).append(":").append(t.port)
+                if (user.isNotEmpty()) append(user).append("@")
+                append(host.ifEmpty { "<host>" }).append(":").append(port)
             }
             connSummaryLabel.text = "SSH: " + shortenMiddle(dest, 52)
-            connSummaryLabel.toolTipText = "${t.source}: $dest"
-        } else {
-            val target = EelBash.describeTarget(project)
-            connSummaryLabel.text = "Target: " + shortenMiddle(target, 52)
-            connSummaryLabel.toolTipText = target
+            connSummaryLabel.toolTipText = "Manual: $dest"
+            return
         }
     }
 
     private fun loadSavedPasswordForSelectedTarget() {
-        val t = gatewayTarget ?: return
+        val key = effectiveSshKeyOrNull() ?: return
         ApplicationManager.getApplication().executeOnPooledThread {
-            val pw = runCatching { SshPasswordStore.load(t.host, t.port, t.user) }.getOrNull().orEmpty()
+            val pw = runCatching { SshPasswordStore.load(key.first, key.second, key.third) }.getOrNull().orEmpty()
             edt {
                 // Do not overwrite what user is currently typing with a late async response.
                 if (sshPasswordField.password.isEmpty()) {
@@ -1230,16 +1567,175 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
     }
 
     private fun applySshPasswordToStoreAndRestart() {
-        val t = gatewayTarget ?: run {
-            restartMonitor()
-            return
-        }
+        val key = effectiveSshKeyOrNull() ?: run { restartMonitor(); return }
         val pw = String(sshPasswordField.password).trim().ifEmpty { null }
         // PasswordSafe is a slow operation; never touch it on EDT.
         ApplicationManager.getApplication().executeOnPooledThread {
-            runCatching { SshPasswordStore.save(t.host, t.port, t.user, pw) }
+            runCatching { SshPasswordStore.save(key.first, key.second, key.third, pw) }
         }
         restartMonitor()
+    }
+
+    private fun applyManualTargetAndRestart() {
+        if (currentConnectionMode() != ConnectionMode.MANUAL_SSH) return
+        saveUiToState()
+        applySelectedSshTargetToHeader()
+        loadSavedPasswordForSelectedTarget()
+        restartMonitor()
+    }
+
+    private fun startReverseTunnel() {
+        if (reverseThread != null) return
+        val base = formParamsOrNull()
+        if (base == null || base.host.isNullOrBlank()) {
+            Messages.showWarningDialog(this, "Configure an SSH target first.", "Reverse Tunnel")
+            return
+        }
+        val bindPort = (reverseBindPortSpin.value as Number).toInt()
+        val localPort = (reverseLocalPortSpin.value as Number).toInt()
+        if (bindPort !in 1..65535 || localPort !in 1..65535) {
+            Messages.showWarningDialog(this, "Invalid ports.", "Reverse Tunnel")
+            return
+        }
+
+        reverseStopFlag.set(false)
+        reverseStartBtn.isEnabled = false
+        reverseStopBtn.isEnabled = true
+        reverseStatusLabel.text = "Starting…"
+        reverseStatusLabel.foreground = JBColor.GRAY
+
+        val dest = buildDest(base) + ":" + base.port
+
+        val t = Thread({
+            try {
+                appendDebug("[reverse-tunnel] target=$dest bind=127.0.0.1:$bindPort -> localhost:$localPort\n")
+                val needAgent = base.password.isNullOrBlank() && base.identityFile.isNullOrBlank()
+                if (needAgent) {
+                    startReverseTunnelSystemSsh(base, bindPort, localPort)
+                } else {
+                    startReverseTunnelJsch(base, bindPort, localPort)
+                }
+            } catch (e: Exception) {
+                appendDebug("[reverse-tunnel] error: ${e.message ?: e.javaClass.simpleName}\n")
+                edt {
+                    reverseStatusLabel.text = "Error: ${e.message ?: e.javaClass.simpleName}"
+                    reverseStatusLabel.foreground = JBColor.RED
+                    reverseStartBtn.isEnabled = true
+                    reverseStopBtn.isEnabled = false
+                }
+            } finally {
+                reverseSession = null
+                reverseProc = null
+                reverseThread = null
+                reverseStopFlag.set(false)
+            }
+        }, "reverse-tunnel").apply { isDaemon = true }
+        reverseThread = t
+        t.start()
+    }
+
+    private fun startReverseTunnelJsch(base: SshParams, bindPort: Int, localPort: Int) {
+        val host = base.host?.trim().orEmpty()
+        val user = base.username?.trim().orEmpty()
+        if (host.isEmpty() || user.isEmpty()) throw IllegalStateException("host/username required")
+        val jsch = com.jcraft.jsch.JSch()
+        val sess = jsch.getSession(user, host, base.port)
+        if (!base.password.isNullOrBlank()) sess.setPassword(base.password)
+        val cfg = java.util.Properties()
+        cfg["StrictHostKeyChecking"] = "no"
+        cfg["PreferredAuthentications"] = "publickey,password,keyboard-interactive"
+        sess.setConfig(cfg)
+        val to = (base.timeoutSec * 1000).toInt().coerceAtLeast(5_000)
+        sess.timeout = to
+        sess.connect(to)
+        reverseSession = sess
+        try {
+            sess.setPortForwardingR("127.0.0.1", bindPort, "127.0.0.1", localPort)
+        } catch (e: Exception) {
+            try { sess.disconnect() } catch (_: Throwable) {}
+            throw e
+        }
+        edt {
+            reverseStatusLabel.text = "Running: $user@$host:${base.port}  -R 127.0.0.1:$bindPort -> localhost:$localPort"
+            reverseStatusLabel.foreground = JBColor.foreground()
+        }
+        while (!reverseStopFlag.get() && sess.isConnected) {
+            try { Thread.sleep(250) } catch (_: InterruptedException) {}
+        }
+        try {
+            runCatching { sess.delPortForwardingR("127.0.0.1", bindPort) }
+            runCatching { sess.delPortForwardingR(bindPort) }
+        } catch (_: Throwable) {}
+        try { sess.disconnect() } catch (_: Throwable) {}
+        edt {
+            reverseStatusLabel.text = "Stopped"
+            reverseStatusLabel.foreground = JBColor.GRAY
+            reverseStartBtn.isEnabled = true
+            reverseStopBtn.isEnabled = false
+        }
+        appendDebug("[reverse-tunnel] stopped\n")
+    }
+
+    private fun startReverseTunnelSystemSsh(base: SshParams, bindPort: Int, localPort: Int) {
+        val host = base.host?.trim().orEmpty()
+        val user = base.username?.trim().orEmpty()
+        if (host.isEmpty() || user.isEmpty()) throw IllegalStateException("host/username required")
+        val dest = "$user@$host"
+        val cmd = arrayListOf(
+            "ssh",
+            "-p", base.port.toString(),
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+            "-N", "-T",
+            "-R", "127.0.0.1:$bindPort:127.0.0.1:$localPort",
+            dest,
+        )
+        appendDebug("[reverse-tunnel] cmd: ${cmd.joinToString(" ")}\n")
+        val pb = ProcessBuilder(cmd)
+        pb.redirectErrorStream(true)
+        val p = pb.start()
+        reverseProc = p
+        edt {
+            reverseStatusLabel.text = "Running (system ssh): $dest:${base.port}  -R 127.0.0.1:$bindPort -> localhost:$localPort"
+            reverseStatusLabel.foreground = JBColor.foreground()
+        }
+        BufferedReader(InputStreamReader(p.inputStream, StandardCharsets.UTF_8)).use { br ->
+            while (!reverseStopFlag.get()) {
+                val line = br.readLine() ?: break
+                if (line.isNotBlank()) appendDebug("[reverse-tunnel] $line\n")
+            }
+        }
+        if (reverseStopFlag.get()) {
+            runCatching { p.destroy() }
+        }
+        runCatching { p.waitFor() }
+        edt {
+            reverseStatusLabel.text = "Stopped"
+            reverseStatusLabel.foreground = JBColor.GRAY
+            reverseStartBtn.isEnabled = true
+            reverseStopBtn.isEnabled = false
+        }
+        appendDebug("[reverse-tunnel] stopped\n")
+    }
+
+    private fun stopReverseTunnel() {
+        reverseStopFlag.set(true)
+        runCatching { reverseProc?.destroy() }
+        runCatching {
+            val s = reverseSession
+            if (s != null) {
+                runCatching { s.delPortForwardingR("127.0.0.1", (reverseBindPortSpin.value as Number).toInt()) }
+                runCatching { s.delPortForwardingR((reverseBindPortSpin.value as Number).toInt()) }
+                runCatching { s.disconnect() }
+            }
+        }
+        edt {
+            reverseStatusLabel.text = "Stopping…"
+            reverseStatusLabel.foreground = JBColor.GRAY
+        }
     }
 
     private fun shortenMiddle(s: String, maxLen: Int): String {
@@ -1276,14 +1772,92 @@ class GpuManagerPanel(private val project: com.intellij.openapi.project.Project)
 
     // --- Persist/restore ---
     private fun loadStateToUi() {
-        val st = GpuManagerState.getInstance().state
-        intervalSpin.value = st.intervalSec
+        loadingState = true
+        try {
+            val st = GpuManagerState.getInstance().state
+            intervalSpin.value = st.intervalSec
+
+            val rst = IsaacLabAssistantProjectState.getInstance(project).state
+            when (rst.connectionMode) {
+                "MANUAL_SSH" -> connectionModeCombo.selectedItem = "Manual SSH"
+                else -> connectionModeCombo.selectedItem = "IDE SSH"
+            }
+            manualSshUserField.text = rst.manualSshUser
+            manualSshHostField.text = rst.manualSshHost
+            manualSshPortField.text = rst.manualSshPort.toString()
+            reverseBindPortSpin.value = rst.reverseTunnelBindPort
+            reverseLocalPortSpin.value = rst.reverseTunnelLocalPort
+
+            entryScriptField.text = rst.entryScript
+            taskField.text = rst.task
+            numEnvsField.text = rst.numEnvs
+            headlessCb.isSelected = rst.headless
+            livestreamCb.isSelected = rst.livestream
+            resumeCb.isSelected = rst.resume
+            experimentNameField.text = rst.experimentName
+            loadRunField.text = rst.loadRun
+            checkpointField.text = rst.checkpoint
+            pendingRunnerSelectedGpus = rst.selectedGpus.toSet()
+
+            paramsModel.rowCount = 0
+            for (kv in rst.additionalParams) paramsModel.addRow(arrayOf(kv.key, kv.value))
+            envModel.rowCount = 0
+            for (kv in rst.additionalEnv) envModel.addRow(arrayOf(kv.key, kv.value))
+
+            // Ensure resume detail panel matches state
+            val on = resumeCb.isSelected
+            experimentNameField.isEnabled = on
+            loadRunField.isEnabled = on
+            loadRunField.textField.isEnabled = on
+            checkpointField.isEnabled = on
+            checkpointField.textField.isEnabled = on
+            resumeSectionPanel.isVisible = on
+        } finally {
+            loadingState = false
+        }
     }
 
     private fun saveUiToState() {
+        if (loadingState) return
         val st = GpuManagerState.getInstance()
         val s = st.state
         s.intervalSec = (intervalSpin.value as Number).toDouble()
+
+        val rst = IsaacLabAssistantProjectState.getInstance(project)
+        val rs = rst.state
+        rs.connectionMode = when (currentConnectionMode()) {
+            ConnectionMode.MANUAL_SSH -> "MANUAL_SSH"
+            else -> "IDE_SSH"
+        }
+        rs.manualSshUser = manualSshUserField.text.orEmpty()
+        rs.manualSshHost = manualSshHostField.text.orEmpty()
+        rs.manualSshPort = manualSshPortField.text.trim().toIntOrNull() ?: 22
+        rs.reverseTunnelBindPort = (reverseBindPortSpin.value as Number).toInt()
+        rs.reverseTunnelLocalPort = (reverseLocalPortSpin.value as Number).toInt()
+
+        rs.entryScript = entryScriptField.textField.text.orEmpty()
+        rs.task = taskField.text.orEmpty()
+        rs.numEnvs = numEnvsField.text.orEmpty()
+        rs.headless = headlessCb.isSelected
+        rs.livestream = livestreamCb.isSelected
+        rs.resume = resumeCb.isSelected
+        rs.experimentName = experimentNameField.text.orEmpty()
+        rs.loadRun = loadRunField.textField.text.orEmpty()
+        rs.checkpoint = checkpointField.textField.text.orEmpty()
+        rs.selectedGpus = getRunnerSelectedGpus().toMutableList()
+
+        rs.additionalParams = MutableList(paramsModel.rowCount) { idx ->
+            IsaacLabAssistantProjectState.Kv(
+                key = paramsModel.getValueAt(idx, 0)?.toString().orEmpty(),
+                value = paramsModel.getValueAt(idx, 1)?.toString().orEmpty(),
+            )
+        }.filter { it.key.isNotBlank() || it.value.isNotBlank() }.toMutableList()
+        rs.additionalEnv = MutableList(envModel.rowCount) { idx ->
+            IsaacLabAssistantProjectState.Kv(
+                key = envModel.getValueAt(idx, 0)?.toString().orEmpty(),
+                value = envModel.getValueAt(idx, 1)?.toString().orEmpty(),
+            )
+        }.filter { it.key.isNotBlank() || it.value.isNotBlank() }.toMutableList()
     }
 
 }

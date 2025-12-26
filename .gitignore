@@ -5,3 +5,5 @@
 .kotlin
 .qodana
 build
+__pycache__/
+*.pyc
